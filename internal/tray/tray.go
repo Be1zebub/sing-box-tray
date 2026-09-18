@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/Be1zebub/sing-box-tray-runner/assets"
 	"github.com/Be1zebub/sing-box-tray-runner/internal/aboutwin"
 	"github.com/Be1zebub/sing-box-tray-runner/internal/autostart"
+	"github.com/Be1zebub/sing-box-tray-runner/internal/clashapi"
 	"github.com/Be1zebub/sing-box-tray-runner/internal/config"
 	"github.com/Be1zebub/sing-box-tray-runner/internal/elevation"
 	"github.com/Be1zebub/sing-box-tray-runner/internal/i18n"
@@ -74,6 +76,7 @@ type menuItems struct {
 
 	openConfigFile   *systray.MenuItem
 	openConfigFolder *systray.MenuItem
+	proxy            *systray.MenuItem
 
 	langAuto *systray.MenuItem
 	langEN   *systray.MenuItem
@@ -86,6 +89,14 @@ type menuItems struct {
 	viewLogs  *systray.MenuItem
 	about     *systray.MenuItem
 	quit      *systray.MenuItem
+}
+
+// proxyMenuGroup is one group inside the Proxy submenu, with its radio items
+// keyed by member name.
+type proxyMenuGroup struct {
+	name   string
+	parent *systray.MenuItem
+	items  map[string]*systray.MenuItem
 }
 
 // App orchestrates the sing-box process, proxy settings, and tray UI.
@@ -105,6 +116,10 @@ type App struct {
 	pendingStart     bool
 	configWatcher    *watcher.Watcher
 	configDirWatcher *watcher.DirWatcher
+
+	proxyParent *systray.MenuItem
+	proxyGroups []proxyMenuGroup
+	proxyShape  string
 }
 
 func NewApp(cfg *config.TrayConfig, exeDir string, initialMode state.ProxyMode, releaseMutex func(), strs i18n.Strings) *App {
@@ -160,6 +175,8 @@ func (a *App) OnReady() {
 	configItems, configNames := a.buildConfigItems(mConfig, a.cfg.ConfigDir)
 	mOpenConfigFile := systray.AddMenuItem(a.strs.MenuOpenConfigFile, "")
 	mOpenConfigFolder := systray.AddMenuItem(a.strs.MenuOpenConfigFolder, "")
+	mProxy := systray.AddMenuItem(a.strs.MenuProxy, "")
+	mProxy.Disable() // enabled once the Clash API answers
 	systray.AddSeparator()
 
 	mLanguages := systray.AddMenuItem(languagesMenuTitle, "")
@@ -206,6 +223,7 @@ func (a *App) OnReady() {
 
 		openConfigFile:   mOpenConfigFile,
 		openConfigFolder: mOpenConfigFolder,
+		proxy:            mProxy,
 
 		langAuto: mLangAuto,
 		langEN:   mLangEN,
@@ -220,8 +238,11 @@ func (a *App) OnReady() {
 		quit:      mQuit,
 	}
 
+	a.proxyParent = mProxy
+
 	go a.watchState()
 	go a.handleClicks()
+	go a.proxyMenuLoop()
 	a.restartConfigWatcher()
 	a.restartConfigDirWatcher()
 
@@ -704,6 +725,145 @@ func (a *App) restartIfRunning() {
 	}
 }
 
+// proxyClient builds a Clash API client from the current settings.
+func (a *App) proxyClient() *clashapi.Client {
+	return clashapi.New(a.cfg.ClashAPI.Listen, a.cfg.ClashAPI.Secret)
+}
+
+// proxyMenuLoop keeps the Proxy submenu in sync with the Clash API. It is cheap
+// to run: a signature comparison decides whether the menu has to be rebuilt,
+// and otherwise only the radio checks are moved.
+func (a *App) proxyMenuLoop() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		a.refreshProxyMenu()
+	}
+}
+
+func (a *App) refreshProxyMenu() {
+	if !a.proc.IsRunning() || !a.cfg.ClashAPI.Enabled {
+		a.clearProxyMenu()
+		return
+	}
+	groups, err := a.proxyClient().Groups()
+	if err != nil {
+		// Unreachable (still starting, wrong port, secret mismatch): just
+		// leave the submenu disabled rather than logging every tick.
+		a.clearProxyMenu()
+		return
+	}
+	if a.proxySignature(groups) != a.proxyShape {
+		a.buildProxyMenu(groups)
+		return
+	}
+	a.syncProxyChecks(groups)
+}
+
+// proxySignature captures everything the submenu renders, so a new group, a new
+// member or a moved selection triggers a rebuild.
+func (a *App) proxySignature(groups []clashapi.Group) string {
+	var b strings.Builder
+	for _, g := range groups {
+		fmt.Fprintf(&b, "%s|%s|%s|%s;", g.Name, g.Type, g.Now, strings.Join(g.All, ","))
+	}
+	return b.String()
+}
+
+// clearProxyMenu hides the submenu's items and disables its parent. Used
+// whenever the Clash API is off or unreachable.
+func (a *App) clearProxyMenu() {
+	if a.proxyParent == nil {
+		return
+	}
+	for _, g := range a.proxyGroups {
+		for _, item := range g.items {
+			item.Hide()
+		}
+		if g.parent != nil {
+			g.parent.Hide()
+		}
+	}
+	a.proxyGroups = nil
+	a.proxyShape = ""
+	a.proxyParent.Disable()
+}
+
+// buildProxyMenu rebuilds the Proxy submenu from the Clash API. Selector groups
+// get clickable radio items; URLTest groups are listed disabled, because
+// sing-box rejects selection there with HTTP 400 — their current pick is still
+// worth showing, since that is what the tunnel actually uses.
+//
+// ponytail: one goroutine per item per rebuild, and hiding an item never closes
+// its ClickedCh, so rebuilds leak a few blocked goroutines. Rebuilds only happen
+// when the API's group shape actually changes, so the ceiling is a handful per
+// mode/config switch; introduce a cancellable watcher if that ever matters.
+func (a *App) buildProxyMenu(groups []clashapi.Group) {
+	if a.proxyParent == nil {
+		return
+	}
+	a.clearProxyMenu()
+
+	for _, g := range groups {
+		parent := a.proxyParent.AddSubMenuItem(g.Name, "")
+		entry := proxyMenuGroup{name: g.Name, parent: parent, items: map[string]*systray.MenuItem{}}
+
+		for _, member := range g.All {
+			item := parent.AddSubMenuItemCheckbox(member, "", member == g.Now)
+
+			if g.Type != "Selector" {
+				item.Disable()
+				entry.items[member] = item
+				continue
+			}
+
+			group, selected := g.Name, member
+			go func() {
+				for range item.ClickedCh {
+					a.selectProxy(group, selected)
+				}
+			}()
+			entry.items[member] = item
+		}
+
+		a.proxyGroups = append(a.proxyGroups, entry)
+	}
+
+	if len(a.proxyGroups) == 0 {
+		a.clearProxyMenu()
+		return
+	}
+	a.proxyShape = a.proxySignature(groups)
+	a.proxyParent.Enable()
+}
+
+// selectProxy switches a selector group to member and refreshes the checks.
+func (a *App) selectProxy(group, member string) {
+	if err := a.proxyClient().Select(group, member); err != nil {
+		a.log("proxy select %s -> %s failed: %s", group, member, err)
+		return
+	}
+	a.log("proxy %s -> %s", group, member)
+	a.refreshProxyMenu()
+}
+
+// syncProxyChecks moves the radio checks to match the current Clash API state.
+func (a *App) syncProxyChecks(groups []clashapi.Group) {
+	byName := make(map[string]clashapi.Group, len(groups))
+	for _, g := range groups {
+		byName[g.Name] = g
+	}
+	for _, entry := range a.proxyGroups {
+		g, ok := byName[entry.name]
+		if !ok {
+			continue
+		}
+		for member, item := range entry.items {
+			checkOrUncheck(item, member == g.Now)
+		}
+	}
+}
+
 // applyLanguage recomputes a.strs for langCode, retitles the menu, and
 // refreshes the dynamic tooltip/icon. Shared by the tray Languages submenu
 // and the Settings window's Save handler.
@@ -747,6 +907,7 @@ func (a *App) refreshMenuTexts() {
 	a.items.config.SetTitle(a.strs.MenuConfig)
 	a.items.openConfigFile.SetTitle(a.strs.MenuOpenConfigFile)
 	a.items.openConfigFolder.SetTitle(a.strs.MenuOpenConfigFolder)
+	a.items.proxy.SetTitle(a.strs.MenuProxy)
 	a.items.autostart.SetTitle(a.strs.MenuAutostart)
 	a.items.autostart.SetTooltip(a.strs.MenuAutostartTip)
 	a.items.viewLogs.SetTitle(a.strs.MenuViewLogs)

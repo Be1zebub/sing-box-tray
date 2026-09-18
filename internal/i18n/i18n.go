@@ -39,6 +39,7 @@ type Strings struct {
 	MenuConfig           string `json:"menu_config"`
 	MenuOpenConfigFile   string `json:"menu_open_config_file"`
 	MenuOpenConfigFolder string `json:"menu_open_config_folder"`
+	MenuProxy            string `json:"menu_proxy"`
 	MenuAutostart        string `json:"menu_autostart"`
 	MenuAutostartTip     string `json:"menu_autostart_tip"`
 	MenuViewLogs         string `json:"menu_view_logs"`

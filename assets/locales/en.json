@@ -14,6 +14,7 @@
   "menu_config": "Config",
   "menu_open_config_file": "Open config file",
   "menu_open_config_folder": "Open config folder",
+  "menu_proxy": "Proxy",
   "menu_autostart": "Autostart",
   "menu_autostart_tip": "Run on Windows logon",
   "menu_view_logs": "View Logs",
