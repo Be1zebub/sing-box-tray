@@ -3,6 +3,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -118,7 +120,36 @@ func Load(exeDir string) (*TrayConfig, error) {
 	cfg.SingBoxPath = absPath(exeDir, cfg.SingBoxPath)
 	cfg.WintunDllPath = absPath(exeDir, cfg.WintunDllPath)
 	cfg.ConfigDir = absPath(exeDir, cfg.ConfigDir)
+
+	// Clash API secrets are generated here, on the load that first needs one,
+	// and persisted immediately: the endpoint is loopback but machine-wide, so
+	// without a secret any local process of any user could read connections or
+	// switch the active outbound.
+	if changed, err := cfg.EnsureClashSecret(); err != nil {
+		return nil, err
+	} else if changed {
+		if err := cfg.Save(exeDir); err != nil {
+			return nil, fmt.Errorf("save generated clash api secret: %w", err)
+		}
+	}
+
 	return &cfg, nil
+}
+
+// EnsureClashSecret fills ClashAPI.Secret with a fresh random value when the
+// API is enabled and no secret is set yet, and reports whether it changed
+// anything so the caller can persist it. A secret already present is left
+// alone — it is shared with whatever else the user points at the API (yacd).
+func (c *TrayConfig) EnsureClashSecret() (bool, error) {
+	if !c.ClashAPI.Enabled || c.ClashAPI.Secret != "" {
+		return false, nil
+	}
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return false, fmt.Errorf("generate clash api secret: %w", err)
+	}
+	c.ClashAPI.Secret = hex.EncodeToString(buf)
+	return true, nil
 }
 
 // hasKey reports whether the raw tray-config.json carries the given top-level

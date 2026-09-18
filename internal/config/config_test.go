@@ -147,3 +147,82 @@ func TestHasKey(t *testing.T) {
 		t.Error("invalid JSON should report absent")
 	}
 }
+
+func TestEnsureClashSecret(t *testing.T) {
+	cases := []struct {
+		name        string
+		cfg         ClashAPIConfig
+		wantChanged bool
+		wantSecret  string // "" means "must stay empty"
+	}{
+		{"disabled, empty", ClashAPIConfig{Enabled: false}, false, ""},
+		{"enabled, empty", ClashAPIConfig{Enabled: true}, true, "<generated>"},
+		{"enabled, already set", ClashAPIConfig{Enabled: true, Secret: "keepme"}, false, "keepme"},
+		{"disabled, already set", ClashAPIConfig{Enabled: false, Secret: "keepme"}, false, "keepme"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := TrayConfig{ClashAPI: tc.cfg}
+			changed, err := cfg.EnsureClashSecret()
+			if err != nil {
+				t.Fatalf("EnsureClashSecret: %v", err)
+			}
+			if changed != tc.wantChanged {
+				t.Errorf("changed = %v, want %v", changed, tc.wantChanged)
+			}
+
+			switch tc.wantSecret {
+			case "<generated>":
+				if len(cfg.ClashAPI.Secret) != 32 {
+					t.Errorf("secret = %q, want 32 hex chars", cfg.ClashAPI.Secret)
+				}
+			default:
+				if cfg.ClashAPI.Secret != tc.wantSecret {
+					t.Errorf("secret = %q, want %q", cfg.ClashAPI.Secret, tc.wantSecret)
+				}
+			}
+		})
+	}
+}
+
+// TestEnsureClashSecretIsRandom guards against a constant or predictable value.
+func TestEnsureClashSecretIsRandom(t *testing.T) {
+	a := TrayConfig{ClashAPI: ClashAPIConfig{Enabled: true}}
+	b := TrayConfig{ClashAPI: ClashAPIConfig{Enabled: true}}
+	if _, err := a.EnsureClashSecret(); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if _, err := b.EnsureClashSecret(); err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if a.ClashAPI.Secret == b.ClashAPI.Secret {
+		t.Error("two generations produced the same secret")
+	}
+}
+
+// TestLoadPersistsGeneratedSecret checks the first-run behaviour: the config
+// written to disk carries the secret, so the injected clash_api block and any
+// other client agree on it across restarts.
+func TestLoadPersistsGeneratedSecret(t *testing.T) {
+	dir := t.TempDir()
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.ClashAPI.Enabled {
+		t.Fatal("default config should have the clash api enabled")
+	}
+	if len(cfg.ClashAPI.Secret) != 32 {
+		t.Fatalf("in-memory secret = %q", cfg.ClashAPI.Secret)
+	}
+
+	reloaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.ClashAPI.Secret != cfg.ClashAPI.Secret {
+		t.Errorf("secret not persisted: %q -> %q", cfg.ClashAPI.Secret, reloaded.ClashAPI.Secret)
+	}
+}

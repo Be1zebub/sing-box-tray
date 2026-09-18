@@ -697,6 +697,13 @@ func (a *App) toggleClashAPI() {
 	if !a.cfg.ClashAPI.Enabled {
 		a.cfg.ClashAPI.Yacd = false
 	}
+	if a.cfg.ClashAPI.Enabled {
+		if changed, err := a.cfg.EnsureClashSecret(); err != nil {
+			a.log("generate clash api secret: %s", err)
+		} else if changed {
+			a.log("clash api: generated a new secret")
+		}
+	}
 	setClashMenuState(a.items.clashAPI, a.items.clashYacd, a.cfg.ClashAPI)
 	if err := a.cfg.Save(a.exeDir); err != nil {
 		a.log("save config after clash api toggle: %s", err)
