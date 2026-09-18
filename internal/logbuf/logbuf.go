@@ -7,13 +7,13 @@ import (
 	"time"
 )
 
-// Buffer is a thread-safe circular buffer of log lines that optionally
-// mirrors all entries to a file writer with timestamps.
+// Buffer is a thread-safe circular buffer of log lines that optionally mirrors
+// all entries to a file writer with timestamps. The file mirror is what the
+// terminal log viewer tails.
 type Buffer struct {
 	mu      sync.RWMutex
 	data    []string
 	cap     int
-	subs    []chan struct{}
 	fileOut io.Writer
 }
 
@@ -38,7 +38,6 @@ func (b *Buffer) Append(line string) {
 		b.data = b.data[1:]
 	}
 	b.data = append(b.data, line)
-	subs := b.subs
 	out := b.fileOut
 	b.mu.Unlock()
 
@@ -46,28 +45,4 @@ func (b *Buffer) Append(line string) {
 		ts := time.Now().Format("2006-01-02 15:04:05")
 		fmt.Fprintf(out, "[%s] %s\n", ts, line)
 	}
-
-	for _, ch := range subs {
-		select {
-		case ch <- struct{}{}:
-		default:
-		}
-	}
-}
-
-func (b *Buffer) Lines() []string {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	out := make([]string, len(b.data))
-	copy(out, b.data)
-	return out
-}
-
-// Subscribe returns a channel that receives a signal on every Append call.
-func (b *Buffer) Subscribe() <-chan struct{} {
-	ch := make(chan struct{}, 8)
-	b.mu.Lock()
-	b.subs = append(b.subs, ch)
-	b.mu.Unlock()
-	return ch
 }

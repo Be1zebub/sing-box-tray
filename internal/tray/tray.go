@@ -5,8 +5,10 @@ package tray
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -21,7 +23,6 @@ import (
 	"github.com/Be1zebub/sing-box-tray-runner/internal/elevation"
 	"github.com/Be1zebub/sing-box-tray-runner/internal/i18n"
 	"github.com/Be1zebub/sing-box-tray-runner/internal/logbuf"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/logwin"
 	"github.com/Be1zebub/sing-box-tray-runner/internal/process"
 	"github.com/Be1zebub/sing-box-tray-runner/internal/proxy"
 	"github.com/Be1zebub/sing-box-tray-runner/internal/settings"
@@ -51,9 +52,6 @@ const (
 var (
 	user32     = windows.NewLazySystemDLL("user32.dll")
 	procMsgBox = user32.NewProc("MessageBoxW")
-
-	shell32       = windows.NewLazySystemDLL("shell32.dll")
-	procShellExec = shell32.NewProc("ShellExecuteW")
 )
 
 type menuItems struct {
@@ -589,31 +587,44 @@ func (a *App) showAbout() {
 	aboutwin.Show(a.strs, appTitle, version.Version, repoURL)
 }
 
-// openActiveConfig opens the currently selected sing-box config in the user's
-// registered editor for .json files.
+// openActiveConfig opens the currently selected sing-box config in whatever
+// application is registered for .json files.
+//
+// It goes through cmd's `start` rather than ShellExecuteW: the tray runs
+// elevated for TUN, and a high-integrity process cannot hand a shell request to
+// the medium-integrity explorer, so ShellExecuteW fails with
+// SE_ERR_ACCESSDENIED (5). explorer.exe can't stand in either — given a file it
+// opens the containing folder instead of the file.
 func (a *App) openActiveConfig() {
-	a.shellOpen(a.cfg.ActiveConfigPath(), "open")
+	cmd := exec.Command("cmd", "/c", "start", "", a.cfg.ActiveConfigPath())
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+	if err := cmd.Start(); err != nil {
+		a.log("open config file failed: %s", err)
+	}
 }
 
-// openConfigDir opens the config folder in Explorer.
+// openConfigDir opens the config folder in Explorer. explorer.exe is spawned
+// directly instead of via ShellExecuteW for the same elevated-shell reason as
+// above; when handed a directory it does exactly what "explore" would.
 func (a *App) openConfigDir() {
-	a.shellOpen(a.cfg.ConfigDir, "explore")
+	cmd := exec.Command("explorer.exe", a.cfg.ConfigDir)
+	if err := cmd.Start(); err != nil {
+		a.log("open config dir failed: %s", err)
+	}
 }
 
-// shellOpen launches path through ShellExecuteW: verb "open" uses the file's
-// registered application, "explore" opens an Explorer window at a folder.
-// Failure is only logged — a stale path simply means nothing opens.
-func (a *App) shellOpen(path, verb string) {
-	verbPtr, _ := windows.UTF16PtrFromString(verb)
-	pathPtr, _ := windows.UTF16PtrFromString(path)
-	// SW_SHOWNORMAL = 1; ShellExecute returns a value > 32 on success.
-	ret, _, _ := procShellExec.Call(0,
-		uintptr(unsafe.Pointer(verbPtr)),
-		uintptr(unsafe.Pointer(pathPtr)),
-		0, 0, 1,
-	)
-	if ret <= 32 {
-		a.log("shell open failed (%s %s): %d", verb, path, ret)
+// openLogTerminal shows the log in a console window that keeps tailing the log
+// file. A console renders sing-box's ANSI-colored output as intended, and
+// unlike the walk window it replaced it doesn't repaint every line on each
+// update (which flickered). The tail length reuses the log_lines setting.
+func (a *App) openLogTerminal() {
+	logPath := filepath.Join(a.exeDir, "sing-box-tray.log")
+	script := fmt.Sprintf("Get-Content -Wait -Tail %d -LiteralPath '%s'", a.cfg.LogLines, logPath)
+	cmd := exec.Command("cmd", "/c", "start", a.strs.LogWindowTitle,
+		"powershell", "-NoExit", "-NoLogo", "-Command", script)
+	if err := cmd.Start(); err != nil {
+		a.log("open log terminal failed: %s", err)
+		infoBox(fmt.Sprintf(a.strs.DialogErrorFmt, err), appTitle)
 	}
 }
 
@@ -852,7 +863,7 @@ func (a *App) handleClicks() {
 		case <-a.items.autostart.ClickedCh:
 			go a.toggleAutostart()
 		case <-a.items.viewLogs.ClickedCh:
-			logwin.Show(a.logBuf, a.cfg.LogLines, a.strs)
+			go a.openLogTerminal()
 		case <-a.items.about.ClickedCh:
 			go a.showAbout()
 		case <-a.items.quit.ClickedCh:
