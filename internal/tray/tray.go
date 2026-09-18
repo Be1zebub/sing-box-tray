@@ -47,6 +47,10 @@ const (
 	langLabelEN        = "English"
 	langLabelRU        = "Русский"
 	langLabelUA        = "Українська"
+
+	// Proper nouns, kept literal for the same reason as the language names.
+	clashAPILabel = "Clash API"
+	yacdLabel     = "YACD dashboard"
 )
 
 var (
@@ -77,6 +81,8 @@ type menuItems struct {
 	langUA   *systray.MenuItem
 
 	autostart *systray.MenuItem
+	clashAPI  *systray.MenuItem
+	clashYacd *systray.MenuItem
 	viewLogs  *systray.MenuItem
 	about     *systray.MenuItem
 	quit      *systray.MenuItem
@@ -164,6 +170,9 @@ func (a *App) OnReady() {
 	systray.AddSeparator()
 
 	mAuto := systray.AddMenuItemCheckbox(a.strs.MenuAutostart, a.strs.MenuAutostartTip, autostart.IsEnabled())
+	mClashAPI := systray.AddMenuItemCheckbox(clashAPILabel, "", a.cfg.ClashAPI.Enabled)
+	mYacd := systray.AddMenuItemCheckbox(yacdLabel, "", a.cfg.ClashAPI.Yacd)
+	setClashMenuState(mClashAPI, mYacd, a.cfg.ClashAPI)
 	systray.AddSeparator()
 
 	mLogs := systray.AddMenuItem(a.strs.MenuViewLogs, "")
@@ -204,6 +213,8 @@ func (a *App) OnReady() {
 		langUA:   mLangUA,
 
 		autostart: mAuto,
+		clashAPI:  mClashAPI,
+		clashYacd: mYacd,
 		viewLogs:  mLogs,
 		about:     mAbout,
 		quit:      mQuit,
@@ -467,6 +478,9 @@ func (a *App) prepareConfig(mode state.ProxyMode) (string, error) {
 			return "", fmt.Errorf("inject TUN config: %w", err)
 		}
 		a.log("temp config written: %s", tmpPath)
+		if err := config.ApplyClashAPI(tmpPath, a.cfg.ClashAPI); err != nil {
+			return "", fmt.Errorf("apply clash api config: %w", err)
+		}
 
 		if err := tun.EnsureWintunDll(a.cfg.WintunDllPath, filepath.Dir(a.cfg.SingBoxPath)); err != nil {
 			a.log("wintun.dll warning: %s", err)
@@ -483,6 +497,9 @@ func (a *App) prepareConfig(mode state.ProxyMode) (string, error) {
 			return "", fmt.Errorf("inject system-proxy config: %w", err)
 		}
 		a.log("temp config written: %s", tmpPath)
+		if err := config.ApplyClashAPI(tmpPath, a.cfg.ClashAPI); err != nil {
+			return "", fmt.Errorf("apply clash api config: %w", err)
+		}
 
 		tag := a.cfg.SystemProxyInbound
 		a.log("looking for http/mixed inbound (tag=%q) in %s", tag, tmpPath)
@@ -502,7 +519,18 @@ func (a *App) prepareConfig(mode state.ProxyMode) (string, error) {
 		return tmpPath, nil
 
 	default:
-		return a.cfg.ActiveConfigPath(), nil
+		// Off mode normally hands the user's config straight to sing-box, but
+		// the clash_api override still has to apply — and the original file
+		// must stay untouched, so run a patched temp copy instead.
+		tmpPath, err := config.CopyWithClashAPI(a.cfg.ActiveConfigPath(), a.cfg.ClashAPI)
+		if err != nil {
+			return "", fmt.Errorf("copy config with clash api: %w", err)
+		}
+		a.log("temp config written: %s", tmpPath)
+		a.mu.Lock()
+		a.tempCfg = tmpPath
+		a.mu.Unlock()
+		return tmpPath, nil
 	}
 }
 
@@ -625,6 +653,54 @@ func (a *App) openLogTerminal() {
 	if err := cmd.Start(); err != nil {
 		a.log("open log terminal failed: %s", err)
 		infoBox(fmt.Sprintf(a.strs.DialogErrorFmt, err), appTitle)
+	}
+}
+
+// setClashMenuState syncs the Clash API / YACD checkboxes with cfg. YACD is
+// served by the Clash API, so its item is disabled while the API is off.
+func setClashMenuState(apiItem, yacdItem *systray.MenuItem, cfg config.ClashAPIConfig) {
+	checkOrUncheck(apiItem, cfg.Enabled)
+	checkOrUncheck(yacdItem, cfg.Yacd)
+	if cfg.Enabled {
+		yacdItem.Enable()
+	} else {
+		yacdItem.Disable()
+	}
+}
+
+// toggleClashAPI flips the Clash API. Disabling it also drops YACD, which is
+// served by the API. The API is baked into the config at process start, so a
+// running sing-box is restarted to apply the change.
+func (a *App) toggleClashAPI() {
+	a.cfg.ClashAPI.Enabled = !a.cfg.ClashAPI.Enabled
+	if !a.cfg.ClashAPI.Enabled {
+		a.cfg.ClashAPI.Yacd = false
+	}
+	setClashMenuState(a.items.clashAPI, a.items.clashYacd, a.cfg.ClashAPI)
+	if err := a.cfg.Save(a.exeDir); err != nil {
+		a.log("save config after clash api toggle: %s", err)
+	}
+	a.log("clash api: %v (yacd=%v)", a.cfg.ClashAPI.Enabled, a.cfg.ClashAPI.Yacd)
+	a.restartIfRunning()
+}
+
+// toggleYacd flips the yacd web dashboard. It lives inside the Clash API, so
+// the menu item is only enabled while the API is on.
+func (a *App) toggleYacd() {
+	a.cfg.ClashAPI.Yacd = !a.cfg.ClashAPI.Yacd
+	checkOrUncheck(a.items.clashYacd, a.cfg.ClashAPI.Yacd)
+	if err := a.cfg.Save(a.exeDir); err != nil {
+		a.log("save config after yacd toggle: %s", err)
+	}
+	a.log("yacd: %v", a.cfg.ClashAPI.Yacd)
+	a.restartIfRunning()
+}
+
+// restartIfRunning restarts sing-box so a config-level change takes effect.
+func (a *App) restartIfRunning() {
+	if a.proc.IsRunning() {
+		a.log("restarting sing-box to apply the config change")
+		go func() { a.stop(); a.start() }()
 	}
 }
 
@@ -862,6 +938,10 @@ func (a *App) handleClicks() {
 			go a.switchLanguage("ua")
 		case <-a.items.autostart.ClickedCh:
 			go a.toggleAutostart()
+		case <-a.items.clashAPI.ClickedCh:
+			go a.toggleClashAPI()
+		case <-a.items.clashYacd.ClickedCh:
+			go a.toggleYacd()
 		case <-a.items.viewLogs.ClickedCh:
 			go a.openLogTerminal()
 		case <-a.items.about.ClickedCh:

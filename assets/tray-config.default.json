@@ -14,6 +14,12 @@
     "listen": "127.0.0.1",
     "listen_port": 2080
   },
+  "clash_api": {
+    "enabled": true,
+    "listen": "127.0.0.1:9090",
+    "secret": "",
+    "yacd": true
+  },
   "tun": {
     "interface_name": "singbox-tun",
     "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],

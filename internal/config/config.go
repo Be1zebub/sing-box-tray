@@ -29,6 +29,7 @@ type TrayConfig struct {
 	Language           string            `json:"language"`
 	SystemProxy        SystemProxyConfig `json:"system_proxy"`
 	TUN                TUNConfig         `json:"tun"`
+	ClashAPI           ClashAPIConfig    `json:"clash_api"`
 }
 
 // SystemProxyConfig describes the default mixed inbound to inject into the
@@ -46,6 +47,17 @@ type TUNConfig struct {
 	RouteAddress        []string `json:"route_address"`
 	RouteExcludeAddress []string `json:"route_exclude_address"`
 	MTU                 int      `json:"mtu"`
+}
+
+// ClashAPIConfig controls the sing-box Clash API (experimental.clash_api).
+// tray-config.json is the source of truth: whatever the sing-box config itself
+// carries is overwritten (or removed) when the run config is prepared, so a
+// panel template can't silently enable a controller the user turned off.
+type ClashAPIConfig struct {
+	Enabled bool   `json:"enabled"`
+	Listen  string `json:"listen"` // host:port -> external_controller
+	Secret  string `json:"secret"` // optional, but recommended
+	Yacd    bool   `json:"yacd"`   // serve the yacd web dashboard
 }
 
 func Load(exeDir string) (*TrayConfig, error) {
@@ -72,6 +84,17 @@ func Load(exeDir string) (*TrayConfig, error) {
 	if cfg.Language == "" {
 		cfg.Language = "auto"
 	}
+	if cfg.ClashAPI.Listen == "" {
+		cfg.ClashAPI.Listen = "127.0.0.1:9090"
+	}
+	if !hasKey(data, "clash_api") {
+		// Before clash_api became tray-config-owned, whatever the sing-box
+		// config carried was used as-is. An absent key keeps that behaviour
+		// instead of silently stripping the controller from a working setup;
+		// setting "enabled": false explicitly turns it off.
+		cfg.ClashAPI.Enabled = true
+		cfg.ClashAPI.Yacd = true
+	}
 	if cfg.ConfigDir == "" && cfg.SelectedConfig == "" {
 		// Migrate the pre-multi-config "config_path" field (a single file
 		// path) so existing installs keep pointing at their real config
@@ -96,6 +119,17 @@ func Load(exeDir string) (*TrayConfig, error) {
 	cfg.WintunDllPath = absPath(exeDir, cfg.WintunDllPath)
 	cfg.ConfigDir = absPath(exeDir, cfg.ConfigDir)
 	return &cfg, nil
+}
+
+// hasKey reports whether the raw tray-config.json carries the given top-level
+// key. Used to tell "field absent" apart from "field set to its zero value".
+func hasKey(data []byte, key string) bool {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	_, ok := probe[key]
+	return ok
 }
 
 // ActiveConfigPath returns the full path to the currently selected sing-box
@@ -248,11 +282,19 @@ func LoadRawSingBoxConfig(path string) (map[string]json.RawMessage, error) {
 	return root, nil
 }
 
-// WriteRawSingBoxConfig marshals root to a temp file and returns its path.
-func WriteRawSingBoxConfig(root map[string]json.RawMessage) (string, error) {
+func marshalConfig(root map[string]json.RawMessage) ([]byte, error) {
 	merged, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
-		return "", fmt.Errorf("marshal merged config: %w", err)
+		return nil, fmt.Errorf("marshal merged config: %w", err)
+	}
+	return merged, nil
+}
+
+// WriteRawSingBoxConfig marshals root to a temp file and returns its path.
+func WriteRawSingBoxConfig(root map[string]json.RawMessage) (string, error) {
+	merged, err := marshalConfig(root)
+	if err != nil {
+		return "", err
 	}
 	tmp, err := os.CreateTemp("", "sing-box-tray-*.json")
 	if err != nil {
@@ -264,6 +306,88 @@ func WriteRawSingBoxConfig(root map[string]json.RawMessage) (string, error) {
 		return "", fmt.Errorf("write temp config: %w", err)
 	}
 	return tmp.Name(), nil
+}
+
+// patchClashAPI sets or removes experimental.clash_api in root according to
+// cfg, leaving every other key (including other experimental entries such as
+// cache_file) untouched.
+func patchClashAPI(root map[string]json.RawMessage, cfg ClashAPIConfig) error {
+	experimental := map[string]json.RawMessage{}
+	if raw, ok := root["experimental"]; ok {
+		if err := json.Unmarshal(raw, &experimental); err != nil {
+			return fmt.Errorf("parse experimental: %w", err)
+		}
+	}
+
+	if !cfg.Enabled {
+		delete(experimental, "clash_api")
+	} else {
+		block := map[string]any{
+			"external_controller": cfg.Listen,
+			"default_mode":        "rule",
+		}
+		if cfg.Secret != "" {
+			block["secret"] = cfg.Secret
+		}
+		if cfg.Yacd {
+			block["external_ui"] = "yacd"
+			block["external_ui_download_url"] = "https://github.com/MetaCubeX/Yacd-meta/archive/gh-pages.zip"
+			block["external_ui_download_detour"] = "direct"
+		}
+		raw, err := json.Marshal(block)
+		if err != nil {
+			return fmt.Errorf("marshal clash_api: %w", err)
+		}
+		experimental["clash_api"] = json.RawMessage(raw)
+	}
+
+	if len(experimental) == 0 {
+		delete(root, "experimental")
+		return nil
+	}
+	raw, err := json.Marshal(experimental)
+	if err != nil {
+		return fmt.Errorf("marshal experimental: %w", err)
+	}
+	root["experimental"] = json.RawMessage(raw)
+	return nil
+}
+
+// ApplyClashAPI rewrites the sing-box config at path in place so that its
+// experimental.clash_api section matches cfg. tray-config.json is the source
+// of truth here: a panel template may ship its own clash_api block, and it gets
+// replaced or removed.
+func ApplyClashAPI(path string, cfg ClashAPIConfig) error {
+	root, err := LoadRawSingBoxConfig(path)
+	if err != nil {
+		return err
+	}
+	if err := patchClashAPI(root, cfg); err != nil {
+		return err
+	}
+	merged, err := marshalConfig(root)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, merged, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// CopyWithClashAPI writes a temp copy of the sing-box config at srcPath with
+// experimental.clash_api patched from cfg. Used in Off mode, which otherwise
+// hands the user's config to sing-box untouched: the original must never be
+// modified, but the clash_api override still has to apply.
+func CopyWithClashAPI(srcPath string, cfg ClashAPIConfig) (string, error) {
+	root, err := LoadRawSingBoxConfig(srcPath)
+	if err != nil {
+		return "", err
+	}
+	if err := patchClashAPI(root, cfg); err != nil {
+		return "", err
+	}
+	return WriteRawSingBoxConfig(root)
 }
 
 // FilterInbounds parses the inbounds JSON array and returns only the entries
