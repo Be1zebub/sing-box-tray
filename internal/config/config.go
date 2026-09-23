@@ -133,6 +133,10 @@ func Load(exeDir string) (*TrayConfig, error) {
 		}
 	}
 
+	if err := ensureSplitTUNFile(exeDir); err != nil {
+		return nil, err
+	}
+
 	return &cfg, nil
 }
 
@@ -170,8 +174,9 @@ func (c *TrayConfig) ActiveConfigPath() string {
 }
 
 // ListConfigFiles returns the base names of every *.json file directly inside
-// dir (non-recursive), sorted alphabetically. tray-config.json is excluded
-// since it can live in the same directory but isn't a sing-box config.
+// dir (non-recursive), sorted alphabetically. tray-config.json and
+// split-tun.json are excluded since the default config dir is the exe
+// directory, where both live, and neither is a sing-box config.
 func ListConfigFiles(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -183,7 +188,8 @@ func ListConfigFiles(dir string) ([]string, error) {
 			continue
 		}
 		name := e.Name()
-		if strings.EqualFold(name, trayConfigFile) || !strings.EqualFold(filepath.Ext(name), ".json") {
+		if strings.EqualFold(name, trayConfigFile) || strings.EqualFold(name, splitTunFile) ||
+			!strings.EqualFold(filepath.Ext(name), ".json") {
 			continue
 		}
 		names = append(names, name)

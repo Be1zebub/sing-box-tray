@@ -6,3 +6,6 @@ import _ "embed"
 
 //go:embed tray-config.default.json
 var DefaultTrayConfig []byte
+
+//go:embed split-tun.default.json
+var DefaultSplitTUN []byte

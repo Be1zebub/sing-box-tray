@@ -94,7 +94,7 @@ func TestBuildTUNInbound(t *testing.T) {
 // TestInjectTUNDefaults runs the full config rewrite and checks the JSON that
 // actually lands on disk.
 func TestInjectTUNDefaults(t *testing.T) {
-	out, err := InjectTUN(writeFixture(t), config.TUNConfig{}, "sing-box.exe")
+	out, err := InjectTUN(writeFixture(t), config.TUNConfig{}, "sing-box.exe", config.SplitTUN{})
 	if err != nil {
 		t.Fatalf("InjectTUN: %v", err)
 	}
@@ -161,6 +161,162 @@ func TestInjectTUNDefaults(t *testing.T) {
 		t.Errorf(`rules[1] must target process_name ["sing-box.exe"], got %v`, process["process_name"])
 	}
 	assertRouteDirect(t, "rules[1]", process)
+}
+
+func TestInjectTUNSplitBypass(t *testing.T) {
+	split := config.SplitTUN{
+		IPCIDR:       []string{"1.2.3.4/32", "2001:db8::/32"},
+		DomainSuffix: []string{"example.com"},
+		ProcessName:  []string{"Discord.exe"},
+		ProcessPath:  []string{`C:\Games\Game.exe`},
+	}
+	out, err := InjectTUN(writeFixture(t), config.TUNConfig{}, "sing-box.exe", split)
+	if err != nil {
+		t.Fatalf("InjectTUN: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(out) })
+
+	got := readInjected(t, out)
+	in := tunInbound(t, got)
+	for _, want := range []string{"1.2.3.4/32", "2001:db8::/32", "10.0.0.0/8"} {
+		if !slices.Contains(in.RouteExcludeAddress, want) {
+			t.Errorf("route_exclude_address missing %q: %v", want, in.RouteExcludeAddress)
+		}
+	}
+
+	rules := got.Route.Rules
+	if len(rules) != 7 {
+		t.Fatalf("want sniff + private + self + 4 split rules, got %v", rules)
+	}
+	if rules[0]["action"] != "sniff" {
+		t.Errorf("rules[0] = %v, want sniff", rules[0])
+	}
+	if rules[1]["ip_is_private"] != true {
+		t.Errorf("rules[1] = %v, want ip_is_private", rules[1])
+	}
+	assertStringList(t, "rules[2].process_name", rules[2]["process_name"], []string{"sing-box.exe"})
+	assertStringList(t, "rules[3].process_name", rules[3]["process_name"], []string{"Discord.exe"})
+	assertStringList(t, "rules[4].process_path", rules[4]["process_path"], []string{`C:\Games\Game.exe`})
+	assertStringList(t, "rules[5].ip_cidr", rules[5]["ip_cidr"], split.IPCIDR)
+	assertStringList(t, "rules[6].domain_suffix", rules[6]["domain_suffix"], []string{"example.com"})
+	for _, i := range []int{1, 2, 3, 4, 5, 6} {
+		assertRouteDirect(t, "rules", rules[i])
+	}
+}
+
+func TestInjectTUNSplitKeepsExistingTunInbound(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	src := `{
+	  "inbounds": [{
+	    "type": "tun",
+	    "tag": "my-tun",
+	    "address": ["172.19.0.1/30"],
+	    "route_exclude_address": ["10.0.0.0/8", "1.2.3.4/32"]
+	  }],
+	  "route": {"rules": [{"domain_suffix": ["keep.example"], "action": "route", "outbound": "proxy"}]}
+	}`
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	out, err := InjectTUN(p, config.TUNConfig{}, "sing-box.exe", config.SplitTUN{
+		IPCIDR: []string{"1.2.3.4/32", "9.9.9.9/32"},
+	})
+	if err != nil {
+		t.Fatalf("InjectTUN: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(out) })
+
+	got := readInjected(t, out)
+	if len(got.Inbounds) != 1 || got.Inbounds[0].Tag != "my-tun" {
+		t.Fatalf("existing tun inbound was replaced: %+v", got.Inbounds)
+	}
+	in := got.Inbounds[0]
+	if !slices.Equal(in.Address, []string{"172.19.0.1/30"}) {
+		t.Errorf("address = %v", in.Address)
+	}
+	if !slices.Equal(in.RouteExcludeAddress, []string{"10.0.0.0/8", "1.2.3.4/32", "9.9.9.9/32"}) {
+		t.Errorf("route_exclude_address = %v", in.RouteExcludeAddress)
+	}
+
+	rules := got.Route.Rules
+	if len(rules) != 4 {
+		t.Fatalf("want private + self + ip_cidr + original, got %v", rules)
+	}
+	if rules[0]["action"] == "sniff" {
+		t.Fatal("sniff must not be injected without domain_suffix entries")
+	}
+	assertStringList(t, "rules[2].ip_cidr", rules[2]["ip_cidr"], []string{"1.2.3.4/32", "9.9.9.9/32"})
+	assertStringList(t, "last rule domain", rules[3]["domain_suffix"], []string{"keep.example"})
+	if rules[3]["outbound"] != "proxy" {
+		t.Errorf("original rule outbound = %v", rules[3]["outbound"])
+	}
+}
+
+type injectedConfig struct {
+	Inbounds []struct {
+		Type                string   `json:"type"`
+		Tag                 string   `json:"tag"`
+		Address             []string `json:"address"`
+		RouteAddress        []string `json:"route_address"`
+		RouteExcludeAddress []string `json:"route_exclude_address"`
+	} `json:"inbounds"`
+	Route struct {
+		AutoDetectInterface bool             `json:"auto_detect_interface"`
+		Rules               []map[string]any `json:"rules"`
+	} `json:"route"`
+}
+
+func readInjected(t *testing.T, path string) injectedConfig {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read injected config: %v", err)
+	}
+	var got injectedConfig
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("parse injected config: %v", err)
+	}
+	return got
+}
+
+func tunInbound(t *testing.T, got injectedConfig) struct {
+	Type                string
+	Tag                 string
+	Address             []string
+	RouteAddress        []string
+	RouteExcludeAddress []string
+} {
+	t.Helper()
+	if len(got.Inbounds) != 1 || got.Inbounds[0].Type != "tun" {
+		t.Fatalf("want exactly one tun inbound, got %+v", got.Inbounds)
+	}
+	in := got.Inbounds[0]
+	return struct {
+		Type                string
+		Tag                 string
+		Address             []string
+		RouteAddress        []string
+		RouteExcludeAddress []string
+	}{in.Type, in.Tag, in.Address, in.RouteAddress, in.RouteExcludeAddress}
+}
+
+func assertStringList(t *testing.T, field string, got any, want []string) {
+	t.Helper()
+	raw, ok := got.([]any)
+	if !ok {
+		t.Fatalf("%s is %T, want list", field, got)
+	}
+	have := make([]string, len(raw))
+	for i, v := range raw {
+		have[i], ok = v.(string)
+		if !ok {
+			t.Fatalf("%s[%d] is %T", field, i, v)
+		}
+	}
+	if !slices.Equal(have, want) {
+		t.Errorf("%s = %v, want %v", field, have, want)
+	}
 }
 
 // assertRouteDirect checks a rule is the modern action/outbound direct form.

@@ -118,13 +118,13 @@ sing-box `config.json` down to only the inbound type relevant to the selected mo
 that defines both a proxy and a TUN inbound doesn't run both at once. Both paths use the shared
 helpers in `internal/config/config.go` (`LoadRawSingBoxConfig`, `FilterInbounds`,
 `WriteRawSingBoxConfig`) to rewrite a temp file — the original `config.json` is never modified. If
-a matching inbound already exists it's kept as-is; only if none is found is a default one built and
-appended.
+a matching inbound already exists it's kept (split-tun IP excludes are still appended to its
+`route_exclude_address`); only if none is found is a default one built and appended.
 - **TUN** (`internal/tun/tun.go`, `InjectTUN`): keeps only `tun`-type inbounds, appending a default
   one built from `tray-config.json`'s `tun.*` fields if none exists. Also injects
   `route.auto_detect_interface: true` (required — without it sing-box cannot build Windows routing
-  table entries and TUN captures no browser traffic) and prepends two route rules (see **TUN IPv6 /
-  routing** below). All three address lists are overridable from `tun.*`.
+  table entries and TUN captures no browser traffic) and prepends route rules (see **TUN IPv6 /
+  routing** and **Split tunnel** below). All three address lists are overridable from `tun.*`.
 - **System proxy** (`config.InjectSystemProxy`): keeps only `http`/`mixed`-type inbounds, appending
   a default `mixed` inbound from `tray-config.json`'s `system_proxy.*` fields if none exists.
 - Both write the result to `os.TempDir()`; the temp file is deleted on stop/crash.
@@ -142,10 +142,22 @@ rules, all in the injected config:
 - `route_exclude_address` covers loopback, RFC1918 and link-local (`127.0.0.0/8`, `::1/128`,
   `10/8`, `172.16/12`, `192.168/16`, `169.254/16`, `fc00::/7`, `fe80::/10`, `ff00::/8`), so LAN and
   loopback traffic never enter the tunnel at all.
-- `route.rules` gets two prepended entries, in this order: `{ip_is_private: true, action: "route",
-  outbound: "direct"}` first, then `{process_name: ["sing-box.exe"], action: "route", outbound:
-  "direct"}` (keeps sing-box's own connections from being re-captured by the TUN interface). Both
-  use the explicit `action: "route"` form — the bare top-level `outbound` form is deprecated.
+- `route.rules` gets prepended entries, in this order: optional `{action: "sniff"}` (only when
+  `split-tun.json` lists domains), then `{ip_is_private: true, action: "route", outbound: "direct"}`,
+  then `{process_name: ["sing-box.exe"], action: "route", outbound: "direct"}` (keeps sing-box's own
+  connections from being re-captured by the TUN interface), then the split-tun bypasses. Direct
+  rules use the explicit `action: "route"` form — the bare top-level `outbound` form is deprecated.
+
+**Split tunnel** (`split-tun.json`, next to the exe, written empty on first `config.Load` if
+missing): bypass list read again on every TUN start. WinTun itself does none of this — it is only
+the packet device. `ip_cidr` is appended to the tun inbound's `route_exclude_address` (Windows
+routing, those destinations never enter the adapter) and also emitted as an `ip_cidr` → `direct`
+rule. `process_name` / `process_path` / `domain_suffix` are sing-box route rules to `direct`
+(process owner and sniffed SNI/Host — the packet does enter the adapter, then leaves via the
+physical NIC). A bare IP is stored as `/32` or `/128`. `*.example.com` is stored as `example.com`.
+`ListConfigFiles` ignores this file the same way it ignores `tray-config.json`. The tray menu
+item `menu_open_split_tun` opens it (recreating the empty template if it was deleted). Empty lists add
+nothing. Covered by `internal/config/split_test.go` and `internal/tun/tun_test.go`.
 
 All of the above is covered by `internal/tun/tun_test.go` (pure JSON transform, no admin needed).
 
@@ -164,8 +176,8 @@ prevent console flash on startup.
 `config.Load` migrates a legacy `config_path` into `config_dir`/`selected_config` on first load, so
 existing installs keep pointing at their real config instead of silently falling back to the exe
 directory. `config.ListConfigFiles` scans `config_dir` non-recursively for `*.json`, excluding
-`tray-config.json` (relevant since the default `config_dir` is `.`, the exe directory, where
-`tray-config.json` also lives). `a.buildConfigItems(parent, dir)` (`tray.go`) does the
+`tray-config.json` and `split-tun.json` (relevant since the default `config_dir` is `.`, the exe
+directory, where both also live). `a.buildConfigItems(parent, dir)` (`tray.go`) does the
 scan-and-populate: it logs `config dir %s: found %d config file(s): %v` unconditionally so a folder
 that unexpectedly yields zero files is diagnosable, adds one checkable submenu item per file found,
 each running its own `for range item.ClickedCh` goroutine (`getlantern/systray`'s

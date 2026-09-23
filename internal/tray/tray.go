@@ -76,6 +76,7 @@ type menuItems struct {
 
 	openConfigFile   *systray.MenuItem
 	openConfigFolder *systray.MenuItem
+	openSplitTUN     *systray.MenuItem
 	proxy            *systray.MenuItem
 
 	langAuto *systray.MenuItem
@@ -175,6 +176,7 @@ func (a *App) OnReady() {
 	configItems, configNames := a.buildConfigItems(mConfig, a.cfg.ConfigDir)
 	mOpenConfigFile := systray.AddMenuItem(a.strs.MenuOpenConfigFile, "")
 	mOpenConfigFolder := systray.AddMenuItem(a.strs.MenuOpenConfigFolder, "")
+	mOpenSplitTUN := systray.AddMenuItem(a.strs.MenuOpenSplitTUN, "")
 	mProxy := systray.AddMenuItem(a.strs.MenuProxy, "")
 	mProxy.Disable() // enabled once the Clash API answers
 	systray.AddSeparator()
@@ -223,6 +225,7 @@ func (a *App) OnReady() {
 
 		openConfigFile:   mOpenConfigFile,
 		openConfigFolder: mOpenConfigFolder,
+		openSplitTUN:     mOpenSplitTUN,
 		proxy:            mProxy,
 
 		langAuto: mLangAuto,
@@ -494,7 +497,15 @@ func (a *App) prepareConfig(mode state.ProxyMode) (string, error) {
 	switch mode {
 	case state.ModeTUN:
 		a.log("injecting TUN inbound into temp config")
-		tmpPath, err := tun.InjectTUN(a.cfg.ActiveConfigPath(), a.cfg.TUN, a.cfg.SingBoxPath)
+		split, err := config.LoadSplitTUN(a.exeDir)
+		if err != nil {
+			return "", fmt.Errorf("load split-tun.json: %w", err)
+		}
+		if !split.Empty() {
+			a.log("split-tun: %d ip, %d domain, %d process name, %d process path",
+				len(split.IPCIDR), len(split.DomainSuffix), len(split.ProcessName), len(split.ProcessPath))
+		}
+		tmpPath, err := tun.InjectTUN(a.cfg.ActiveConfigPath(), a.cfg.TUN, a.cfg.SingBoxPath, split)
 		if err != nil {
 			return "", fmt.Errorf("inject TUN config: %w", err)
 		}
@@ -649,6 +660,21 @@ func (a *App) openActiveConfig() {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 	if err := cmd.Start(); err != nil {
 		a.log("open config file failed: %s", err)
+	}
+}
+
+// openSplitTUN opens split-tun.json. LoadSplitTUN recreates the empty
+// template first if the file was deleted, so the editor always has something
+// to show.
+func (a *App) openSplitTUN() {
+	if _, err := config.LoadSplitTUN(a.exeDir); err != nil {
+		a.log("open split-tun.json failed: %s", err)
+		return
+	}
+	cmd := exec.Command("cmd", "/c", "start", "", config.SplitTUNPath(a.exeDir))
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+	if err := cmd.Start(); err != nil {
+		a.log("open split-tun.json failed: %s", err)
 	}
 }
 
@@ -914,6 +940,7 @@ func (a *App) refreshMenuTexts() {
 	a.items.config.SetTitle(a.strs.MenuConfig)
 	a.items.openConfigFile.SetTitle(a.strs.MenuOpenConfigFile)
 	a.items.openConfigFolder.SetTitle(a.strs.MenuOpenConfigFolder)
+	a.items.openSplitTUN.SetTitle(a.strs.MenuOpenSplitTUN)
 	a.items.proxy.SetTitle(a.strs.MenuProxy)
 	a.items.autostart.SetTitle(a.strs.MenuAutostart)
 	a.items.autostart.SetTooltip(a.strs.MenuAutostartTip)
@@ -1096,6 +1123,8 @@ func (a *App) handleClicks() {
 			go a.openActiveConfig()
 		case <-a.items.openConfigFolder.ClickedCh:
 			go a.openConfigDir()
+		case <-a.items.openSplitTUN.ClickedCh:
+			go a.openSplitTUN()
 		case <-a.items.langAuto.ClickedCh:
 			go a.switchLanguage("auto")
 		case <-a.items.langEN.ClickedCh:

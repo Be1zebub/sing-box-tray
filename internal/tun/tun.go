@@ -15,10 +15,13 @@ import (
 // InjectTUN reads the sing-box config at sbConfigPath and strips any inbound
 // that is not a tun inbound (so an http/mixed inbound left over from the base
 // config isn't run alongside TUN). If the base config already has a tun
-// inbound, it is kept as-is; otherwise a default one built from cfg is
-// appended. Prepends a process-exclusion route rule so sing-box's own traffic
-// is not looped back through TUN, writes the result to a temp file, and
-// returns its path.
+// inbound, it is kept; otherwise a default one built from cfg is appended.
+// split ip_cidr values are appended to that inbound's route_exclude_address,
+// and split process/domain/ip entries are prepended as direct route rules
+// (a sniff action is prepended first when domain_suffix is set). A
+// process-exclusion route rule for sing-box itself is always prepended so its
+// own traffic is not looped back through TUN. The result is written to a temp
+// file, whose path is returned.
 //
 // The injected tun inbound always carries an IPv6 address in addition to the
 // IPv4 one: with strict_route enabled, sing-tun installs an unconditional WFP
@@ -27,7 +30,7 @@ import (
 // to IPv6 (Node/Vite, Next, etc.). route_address stays IPv4-only so no IPv6
 // default route is added, and route_exclude_address keeps loopback, private
 // and link-local traffic out of the tunnel.
-func InjectTUN(sbConfigPath string, cfg config.TUNConfig, singBoxPath string) (string, error) {
+func InjectTUN(sbConfigPath string, cfg config.TUNConfig, singBoxPath string, split config.SplitTUN) (string, error) {
 	root, err := config.LoadRawSingBoxConfig(sbConfigPath)
 	if err != nil {
 		return "", err
@@ -40,11 +43,19 @@ func InjectTUN(sbConfigPath string, cfg config.TUNConfig, singBoxPath string) (s
 
 	if len(inbounds) == 0 {
 		tunInbound := buildTUNInbound(cfg)
+		if len(split.IPCIDR) > 0 {
+			tunInbound["route_exclude_address"] = mergeUnique(asStrings(tunInbound["route_exclude_address"]), split.IPCIDR)
+		}
 		tunRaw, err := json.Marshal(tunInbound)
 		if err != nil {
 			return "", fmt.Errorf("marshal tun inbound: %w", err)
 		}
 		inbounds = append(inbounds, json.RawMessage(tunRaw))
+	} else if len(split.IPCIDR) > 0 {
+		inbounds, err = appendRouteExcludes(inbounds, split.IPCIDR)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	inboundsRaw, err := json.Marshal(inbounds)
@@ -53,9 +64,10 @@ func InjectTUN(sbConfigPath string, cfg config.TUNConfig, singBoxPath string) (s
 	}
 	root["inbounds"] = json.RawMessage(inboundsRaw)
 
-	// Prepend a route rule that sends sing-box's own process traffic directly,
-	// preventing it from looping back through the TUN interface.
-	if err := injectSelfBypassRule(root, filepath.Base(singBoxPath)); err != nil {
+	// Prepend route rules that send sing-box's own process traffic, and any
+	// split-tun.json bypasses, directly — so they are not looped back through
+	// the TUN interface.
+	if err := injectSelfBypassRule(root, filepath.Base(singBoxPath), split); err != nil {
 		return "", err
 	}
 
@@ -131,12 +143,14 @@ func buildTUNInbound(cfg config.TUNConfig) map[string]any {
 //     use when building the auto_route routing table (without this the default
 //     routes that redirect browser traffic into TUN are not set up correctly on
 //     Windows)
-//   - prepends two "direct" rules: ip_is_private (so private/loopback
-//     destinations never enter the tunnel) and then a process_name rule for
-//     sing-box's own connections (breaking the TUN loop for the proxy process
-//     itself). Both use the explicit action: "route" form; the bare
-//     top-level "outbound" form is deprecated.
-func injectSelfBypassRule(root map[string]json.RawMessage, processName string) error {
+//   - prepends "direct" rules: ip_is_private (so private/loopback destinations
+//     never enter the tunnel), a process_name rule for sing-box's own
+//     connections (breaking the TUN loop for the proxy process itself), then
+//     the split-tun.json bypasses. When split lists domains, a sniff action
+//     goes first so domain_suffix can match the TLS SNI / HTTP Host. Direct
+//     rules use the explicit action: "route" form; the bare top-level
+//     "outbound" form is deprecated.
+func injectSelfBypassRule(root map[string]json.RawMessage, processName string, split config.SplitTUN) error {
 	var route map[string]json.RawMessage
 	if raw, ok := root["route"]; ok {
 		if err := json.Unmarshal(raw, &route); err != nil {
@@ -162,29 +176,11 @@ func injectSelfBypassRule(root map[string]json.RawMessage, processName string) e
 		}
 	}
 
-	// ip_is_private goes first: private, loopback and link-local destinations
-	// must always go direct, even if something still enters the TUN.
-	privateRule := map[string]any{
-		"ip_is_private": true,
-		"action":        "route",
-		"outbound":      "direct",
-	}
-	privateRaw, err := json.Marshal(privateRule)
+	prefix, err := bypassRules(processName, split)
 	if err != nil {
-		return fmt.Errorf("marshal private-direct rule: %w", err)
+		return err
 	}
-
-	processRule := map[string]any{
-		"process_name": []string{processName},
-		"action":       "route",
-		"outbound":     "direct",
-	}
-	processRaw, err := json.Marshal(processRule)
-	if err != nil {
-		return fmt.Errorf("marshal process-direct rule: %w", err)
-	}
-
-	rules = append([]json.RawMessage{json.RawMessage(privateRaw), json.RawMessage(processRaw)}, rules...)
+	rules = append(prefix, rules...)
 
 	rulesRaw, err := json.Marshal(rules)
 	if err != nil {
@@ -198,6 +194,131 @@ func injectSelfBypassRule(root map[string]json.RawMessage, processName string) e
 	}
 	root["route"] = routeRaw
 	return nil
+}
+
+// bypassRules returns the rules prepended to route.rules. Sniff is included
+// only when domains need it; otherwise an unconditional sniff would change
+// how the user's own later rules match.
+func bypassRules(processName string, split config.SplitTUN) ([]json.RawMessage, error) {
+	var prefix []json.RawMessage
+	if len(split.DomainSuffix) > 0 {
+		sniff, err := json.Marshal(map[string]any{"action": "sniff"})
+		if err != nil {
+			return nil, fmt.Errorf("marshal sniff rule: %w", err)
+		}
+		prefix = append(prefix, sniff)
+	}
+
+	private, err := directRule(map[string]any{"ip_is_private": true})
+	if err != nil {
+		return nil, err
+	}
+	self, err := directRule(map[string]any{"process_name": []string{processName}})
+	if err != nil {
+		return nil, err
+	}
+	prefix = append(prefix, private, self)
+
+	if len(split.ProcessName) > 0 {
+		rule, err := directRule(map[string]any{"process_name": split.ProcessName})
+		if err != nil {
+			return nil, err
+		}
+		prefix = append(prefix, rule)
+	}
+	if len(split.ProcessPath) > 0 {
+		rule, err := directRule(map[string]any{"process_path": split.ProcessPath})
+		if err != nil {
+			return nil, err
+		}
+		prefix = append(prefix, rule)
+	}
+	if len(split.IPCIDR) > 0 {
+		rule, err := directRule(map[string]any{"ip_cidr": split.IPCIDR})
+		if err != nil {
+			return nil, err
+		}
+		prefix = append(prefix, rule)
+	}
+	if len(split.DomainSuffix) > 0 {
+		rule, err := directRule(map[string]any{"domain_suffix": split.DomainSuffix})
+		if err != nil {
+			return nil, err
+		}
+		prefix = append(prefix, rule)
+	}
+	return prefix, nil
+}
+
+func directRule(match map[string]any) (json.RawMessage, error) {
+	match["action"] = "route"
+	match["outbound"] = "direct"
+	raw, err := json.Marshal(match)
+	if err != nil {
+		return nil, fmt.Errorf("marshal direct rule: %w", err)
+	}
+	return raw, nil
+}
+
+// appendRouteExcludes adds cidrs to each tun inbound's route_exclude_address,
+// keeping addresses the user already listed and skipping duplicates. Other
+// inbound fields are left as they were.
+func appendRouteExcludes(inbounds []json.RawMessage, cidrs []string) ([]json.RawMessage, error) {
+	for i, raw := range inbounds {
+		var inbound map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &inbound); err != nil {
+			return nil, fmt.Errorf("parse tun inbound: %w", err)
+		}
+		var existing []string
+		if excl, ok := inbound["route_exclude_address"]; ok && len(excl) > 0 && string(excl) != "null" {
+			if err := json.Unmarshal(excl, &existing); err != nil {
+				return nil, fmt.Errorf("parse route_exclude_address: %w", err)
+			}
+		}
+		merged, err := json.Marshal(mergeUnique(existing, cidrs))
+		if err != nil {
+			return nil, fmt.Errorf("marshal route_exclude_address: %w", err)
+		}
+		inbound["route_exclude_address"] = merged
+		updated, err := json.Marshal(inbound)
+		if err != nil {
+			return nil, fmt.Errorf("marshal tun inbound: %w", err)
+		}
+		inbounds[i] = updated
+	}
+	return inbounds, nil
+}
+
+func mergeUnique(base, extra []string) []string {
+	seen := make(map[string]struct{}, len(base)+len(extra))
+	out := make([]string, 0, len(base)+len(extra))
+	for _, list := range [][]string{base, extra} {
+		for _, s := range list {
+			if _, ok := seen[s]; ok {
+				continue
+			}
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func asStrings(v any) []string {
+	switch t := v.(type) {
+	case []string:
+		return t
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func copyFile(src, dst string) error {
