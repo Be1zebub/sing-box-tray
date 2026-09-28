@@ -9,7 +9,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/Be1zebub/sing-box-tray-runner/assets"
+	"github.com/Be1zebub/sing-box-tray/assets"
 )
 
 type Lang string
@@ -21,11 +21,9 @@ const (
 )
 
 // Strings holds every user-facing UI string (tray menu, dialogs, toast
-// notifications, Settings/Log window chrome). Log messages are deliberately
+// notifications, log window title). Log messages are deliberately
 // not covered here — they stay in English regardless of UI language.
 type Strings struct {
-	MenuSettings         string `json:"menu_settings"`
-	MenuSettingsTip      string `json:"menu_settings_tip"`
 	MenuStart            string `json:"menu_start"`
 	MenuStartTip         string `json:"menu_start_tip"`
 	MenuStop             string `json:"menu_stop"`
@@ -40,6 +38,7 @@ type Strings struct {
 	MenuOpenConfigFile   string `json:"menu_open_config_file"`
 	MenuOpenConfigFolder string `json:"menu_open_config_folder"`
 	MenuOpenSplitTUN     string `json:"menu_open_split_tun"`
+	MenuOpenImporter     string `json:"menu_open_importer"`
 	MenuProxy            string `json:"menu_proxy"`
 	MenuAutostart        string `json:"menu_autostart"`
 	MenuAutostartTip     string `json:"menu_autostart_tip"`
@@ -47,28 +46,23 @@ type Strings struct {
 	MenuAbout            string `json:"menu_about"`
 	MenuExit             string `json:"menu_exit"`
 
-	TooltipStopped    string `json:"tooltip_stopped"`
-	TooltipRunningFmt string `json:"tooltip_running_fmt"`
-	TooltipCrashed    string `json:"tooltip_crashed"`
+	TooltipStopped string `json:"tooltip_stopped"`
+
+	StatusRunning  string `json:"status_running"`
+	StatusStopped  string `json:"status_stopped"`
+	StatusCrashed  string `json:"status_crashed"`
+	StatusStarting string `json:"status_starting"`
+	StatusStopping string `json:"status_stopping"`
 
 	ToastCrashedTitle string `json:"toast_crashed_title"`
 	ToastCrashedMsg   string `json:"toast_crashed_msg"`
 
-	DialogConfigChangedFmt  string `json:"dialog_config_changed_fmt"`
-	DialogErrorFmt          string `json:"dialog_error_fmt"`
-	DialogMissingSingBoxFmt string `json:"dialog_missing_sing_box_fmt"`
-	DialogMissingWintunFmt  string `json:"dialog_missing_wintun_fmt"`
-	DialogMissingConfigFmt  string `json:"dialog_missing_config_fmt"`
-
-	SettingsTitle         string `json:"settings_title"`
-	SettingsSingBoxPath   string `json:"settings_sing_box_path"`
-	SettingsWintunPath    string `json:"settings_wintun_path"`
-	SettingsConfigDir     string `json:"settings_config_dir"`
-	SettingsActiveConfig  string `json:"settings_active_config"`
-	SettingsBrowse        string `json:"settings_browse"`
-	SettingsLanguageLabel string `json:"settings_language_label"`
-	SettingsSave          string `json:"settings_save"`
-	SettingsCancel        string `json:"settings_cancel"`
+	DialogConfigChangedFmt   string `json:"dialog_config_changed_fmt"`
+	DialogErrorFmt           string `json:"dialog_error_fmt"`
+	DialogMissingSingBoxFmt  string `json:"dialog_missing_sing_box_fmt"`
+	DialogMissingWintunFmt   string `json:"dialog_missing_wintun_fmt"`
+	DialogMissingConfigFmt   string `json:"dialog_missing_config_fmt"`
+	DialogMissingImporterFmt string `json:"dialog_missing_importer_fmt"`
 
 	LogWindowTitle string `json:"log_window_title"`
 

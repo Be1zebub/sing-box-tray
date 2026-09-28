@@ -10,10 +10,11 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 
-	"github.com/Be1zebub/sing-box-tray-runner/internal/logbuf"
+	"github.com/Be1zebub/sing-box-tray/internal/logbuf"
 )
 
 // Manager owns the sing-box child process lifecycle.
@@ -26,6 +27,7 @@ type Manager struct {
 	cmd          *exec.Cmd
 	waitDone     chan struct{}
 	expectedStop bool
+	job          windows.Handle
 }
 
 func NewManager(singBoxPath string, buf *logbuf.Buffer, onCrash func()) *Manager {
@@ -63,6 +65,9 @@ func (m *Manager) Start(configPath string) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start sing-box: %w", err)
 	}
+	if err := m.track(cmd); err != nil {
+		m.buf.Append(fmt.Sprintf("[tray] sing-box job: %s", err))
+	}
 
 	m.cmd = cmd
 	m.waitDone = make(chan struct{})
@@ -73,6 +78,38 @@ func (m *Manager) Start(configPath string) error {
 	go m.watch()
 
 	return nil
+}
+
+// track puts the child in a job that Windows destroys when this process
+// exits, including a kill from Task Manager. OnExit still stops it first.
+func (m *Manager) track(cmd *exec.Cmd) error {
+	if m.job == 0 {
+		job, err := windows.CreateJobObject(nil, nil)
+		if err != nil {
+			return err
+		}
+		info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
+			BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{
+				LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+			},
+		}
+		if _, err := windows.SetInformationJobObject(
+			job,
+			windows.JobObjectExtendedLimitInformation,
+			uintptr(unsafe.Pointer(&info)),
+			uint32(unsafe.Sizeof(info)),
+		); err != nil {
+			windows.CloseHandle(job)
+			return err
+		}
+		m.job = job
+	}
+	proc, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(proc)
+	return windows.AssignProcessToJobObject(m.job, proc)
 }
 
 // Stop sends a terminate signal and waits up to timeout before force-killing.

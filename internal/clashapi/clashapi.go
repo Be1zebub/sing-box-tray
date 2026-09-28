@@ -147,11 +147,14 @@ func dechunk(body []byte) ([]byte, error) {
 	}
 }
 
-// Groups returns the Selector and URLTest groups, sorted by name.
-func (c *Client) Groups() ([]Group, error) {
+// Groups returns the Selector and URLTest groups, sorted by name, and the
+// default outbound tag. sing-box publishes that tag as proxies.GLOBAL.now
+// (type Fallback); it is route.final, or the outbound sing-box picked when
+// route.final is empty. GLOBAL itself is not a real group and is not returned.
+func (c *Client) Groups() (groups []Group, defaultTag string, err error) {
 	body, err := c.do("GET", "/proxies", nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	var payload struct {
 		Proxies map[string]struct {
@@ -161,18 +164,22 @@ func (c *Client) Groups() ([]Group, error) {
 		} `json:"proxies"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, fmt.Errorf("parse /proxies: %w", err)
+		return nil, "", fmt.Errorf("parse /proxies: %w", err)
 	}
 
-	groups := make([]Group, 0, len(payload.Proxies))
+	groups = make([]Group, 0, len(payload.Proxies))
 	for name, p := range payload.Proxies {
+		if name == "GLOBAL" && p.Type == "Fallback" {
+			defaultTag = p.Now
+			continue
+		}
 		if p.Type != "Selector" && p.Type != "URLTest" {
 			continue
 		}
 		groups = append(groups, Group{Name: name, Type: p.Type, Now: p.Now, All: p.All})
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].Name < groups[j].Name })
-	return groups, nil
+	return groups, defaultTag, nil
 }
 
 // Select switches the selection of group to name.
@@ -185,4 +192,67 @@ func (c *Client) Select(group, name string) error {
 		return err
 	}
 	return nil
+}
+
+// Delay asks sing-box to probe name and returns the round-trip in milliseconds.
+func (c *Client) Delay(name string) (int, error) {
+	q := url.Values{}
+	q.Set("timeout", "2000")
+	q.Set("url", "https://www.gstatic.com/generate_204")
+	body, err := c.do("GET", "/proxies/"+url.PathEscape(name)+"/delay?"+q.Encode(), nil)
+	if err != nil {
+		return 0, err
+	}
+	var payload struct {
+		Delay int `json:"delay"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return 0, fmt.Errorf("parse delay: %w", err)
+	}
+	if payload.Delay <= 0 {
+		return 0, fmt.Errorf("delay for %s was %d", name, payload.Delay)
+	}
+	return payload.Delay, nil
+}
+
+// ActiveRoute walks defaultTag through Selector and URLTest groups. defaultTag
+// is proxies.GLOBAL.now. via is the first selector on that path, so the menu
+// can show which group was followed. The returned leaf is the concrete tag.
+// An empty defaultTag does not guess among the groups.
+func ActiveRoute(defaultTag string, groups []Group) (leaf, via string) {
+	if defaultTag == "" {
+		return "", ""
+	}
+	byName := make(map[string]Group, len(groups))
+	for _, g := range groups {
+		byName[g.Name] = g
+	}
+	seen := make(map[string]bool, len(groups))
+	cur := defaultTag
+	for {
+		g, ok := byName[cur]
+		if !ok || g.Now == "" || seen[cur] {
+			return cur, via
+		}
+		seen[cur] = true
+		if via == "" && g.Type == "Selector" {
+			via = g.Name
+		}
+		cur = g.Now
+	}
+}
+
+// Probeable reports whether leaf is a proxy worth a delay request.
+// direct, block, and dns are sing-box's non-proxy defaults. A group member
+// keeps its name even when that name is one of those tags.
+func Probeable(leaf, via string) bool {
+	if leaf == "" || via != "" {
+		return leaf != ""
+	}
+	switch leaf {
+	case "direct", "block", "dns":
+		return false
+	default:
+		return true
+	}
 }

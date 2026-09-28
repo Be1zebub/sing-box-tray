@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -224,5 +225,47 @@ func TestLoadPersistsGeneratedSecret(t *testing.T) {
 	}
 	if reloaded.ClashAPI.Secret != cfg.ClashAPI.Secret {
 		t.Errorf("secret not persisted: %q -> %q", cfg.ClashAPI.Secret, reloaded.ClashAPI.Secret)
+	}
+}
+
+func TestLoadFreshUsesInstallLayout(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if filepath.Base(cfg.FilePath()) != "config.json" {
+		t.Fatalf("settings file = %s", cfg.FilePath())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tray-config.json")); !os.IsNotExist(err) {
+		t.Fatalf("fresh install wrote tray-config.json: %v", err)
+	}
+	if got := filepath.ToSlash(cfg.SingBoxPath); !strings.HasSuffix(got, "/deps/sing-box.exe") {
+		t.Fatalf("sing-box path = %s", cfg.SingBoxPath)
+	}
+	if filepath.Base(cfg.ConfigDir) != "configs" {
+		t.Fatalf("config dir = %s", cfg.ConfigDir)
+	}
+}
+
+func TestLoadDoesNotClobberSingBoxConfigJSON(t *testing.T) {
+	dir := t.TempDir()
+	original := []byte("{\"inbounds\":[]}\n")
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if filepath.Base(cfg.FilePath()) != "tray-config.json" {
+		t.Fatalf("settings file = %s", cfg.FilePath())
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("sing-box config.json was overwritten:\n%s", got)
 	}
 }

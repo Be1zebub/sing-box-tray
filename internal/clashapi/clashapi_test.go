@@ -156,8 +156,65 @@ func waitOn(t *testing.T, ch chan string) string {
 	}
 }
 
+func TestActiveRouteFollowsURLTest(t *testing.T) {
+	groups := []Group{
+		{Name: "Auto", Type: "URLTest", Now: "node-a"},
+		{Name: "group", Type: "Selector", Now: "Auto"},
+	}
+	leaf, via := ActiveRoute("group", groups)
+	if leaf != "node-a" || via != "group" {
+		t.Fatalf("got %q | %q", leaf, via)
+	}
+}
+
+func TestActiveRouteUsesGlobalNotAlphabeticalSelector(t *testing.T) {
+	groups := []Group{
+		{Name: "AAA", Type: "Selector", Now: "wrong"},
+		{Name: "Proxy", Type: "Selector", Now: "node-b"},
+	}
+	leaf, via := ActiveRoute("Proxy", groups)
+	if leaf != "node-b" || via != "Proxy" {
+		t.Fatalf("got %q | %q", leaf, via)
+	}
+	leaf, via = ActiveRoute("", groups)
+	if leaf != "" || via != "" {
+		t.Fatalf("missing GLOBAL guessed %q | %q", leaf, via)
+	}
+}
+
+func TestActiveRouteDirectIsNotAGroup(t *testing.T) {
+	leaf, via := ActiveRoute("direct", nil)
+	if leaf != "direct" || via != "" {
+		t.Fatalf("got %q | %q", leaf, via)
+	}
+	if Probeable(leaf, via) {
+		t.Fatal("direct default must not be probed")
+	}
+	if !Probeable("node-a", "") {
+		t.Fatal("a concrete final outbound should be probed")
+	}
+	if !Probeable("direct", "Proxy") {
+		t.Fatal("a selected member named direct should still be probed")
+	}
+}
+
+func TestActiveRouteStopsOnCycle(t *testing.T) {
+	groups := []Group{
+		{Name: "A", Type: "Selector", Now: "B"},
+		{Name: "B", Type: "Selector", Now: "A"},
+	}
+	leaf, via := ActiveRoute("A", groups)
+	if leaf != "A" && leaf != "B" {
+		t.Fatalf("leaf = %q", leaf)
+	}
+	if via != "A" {
+		t.Fatalf("via = %q", via)
+	}
+}
+
 func TestGroups(t *testing.T) {
 	body := `{"proxies":{
+      "GLOBAL":{"type":"Fallback","now":"pick","all":["auto","pick"]},
       "auto":{"type":"URLTest","now":"B","all":["A","B"]},
       "pick":{"type":"Selector","now":"A","all":["A","B"]},
       "direct":{"type":"Direct","now":"","all":null},
@@ -165,12 +222,15 @@ func TestGroups(t *testing.T) {
     }}`
 	s := newStubServer(t, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"+body)
 
-	groups, err := New(s.addr(), "").Groups()
+	groups, defaultTag, err := New(s.addr(), "").Groups()
 	if err != nil {
 		t.Fatalf("Groups: %v", err)
 	}
 	if line := waitOn(t, s.requests); !strings.HasPrefix(line, "GET /proxies ") {
 		t.Errorf("request line = %q", line)
+	}
+	if defaultTag != "pick" {
+		t.Fatalf("default tag = %q", defaultTag)
 	}
 	if len(groups) != 2 {
 		t.Fatalf("want 2 selectable groups, got %d: %+v", len(groups), groups)
@@ -189,10 +249,10 @@ func TestGroups(t *testing.T) {
 
 func TestSelect(t *testing.T) {
 	// A group name with a space and a non-ASCII character exercises escaping.
-	group := "→ Remnawave"
+	group := "→ group"
 	s := newStubServer(t, "HTTP/1.1 204 No Content\r\n\r\n")
 
-	if err := New(s.addr(), "topsecret").Select(group, "Vless Reality | Best Bypass"); err != nil {
+	if err := New(s.addr(), "topsecret").Select(group, "node | group"); err != nil {
 		t.Fatalf("Select: %v", err)
 	}
 
@@ -206,7 +266,7 @@ func TestSelect(t *testing.T) {
 	}
 
 	body := waitOn(t, s.bodies)
-	if body != `{"name":"Vless Reality | Best Bypass"}` {
+	if body != `{"name":"node | group"}` {
 		t.Errorf("body = %q", body)
 	}
 }
@@ -220,7 +280,7 @@ func TestSelectSurfacesHTTPError(t *testing.T) {
 
 func TestDialFailureIsReported(t *testing.T) {
 	// Nothing listens here: the client must return an error, not hang.
-	if _, err := New("127.0.0.1:1", "").Groups(); err == nil {
+	if _, _, err := New("127.0.0.1:1", "").Groups(); err == nil {
 		t.Fatal("expected a dial error")
 	}
 }

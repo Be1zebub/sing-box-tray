@@ -6,18 +6,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 
-	"github.com/Be1zebub/sing-box-tray-runner/internal/config"
+	"github.com/Be1zebub/sing-box-tray/internal/config"
 )
 
 // InjectTUN reads the sing-box config at sbConfigPath and strips any inbound
 // that is not a tun inbound (so an http/mixed inbound left over from the base
 // config isn't run alongside TUN). If the base config already has a tun
 // inbound, it is kept; otherwise a default one built from cfg is appended.
-// split ip_cidr values are appended to that inbound's route_exclude_address,
-// and split process/domain/ip entries are prepended as direct route rules
+// Blacklist ip_cidr values are appended to that inbound's route_exclude_address.
+// Whitelist ip_cidr values are routed to route.final, and any exclude prefix
+// that overlaps them is removed so those packets can enter the adapter.
+// Split process/domain/ip entries are prepended as route rules
 // (a sniff action is prepended first when domain_suffix is set). A
 // process-exclusion route rule for sing-box itself is always prepended so its
 // own traffic is not looped back through TUN. The result is written to a temp
@@ -43,16 +47,25 @@ func InjectTUN(sbConfigPath string, cfg config.TUNConfig, singBoxPath string, sp
 
 	if len(inbounds) == 0 {
 		tunInbound := buildTUNInbound(cfg)
-		if len(split.IPCIDR) > 0 {
-			tunInbound["route_exclude_address"] = mergeUnique(asStrings(tunInbound["route_exclude_address"]), split.IPCIDR)
+		excl := asStrings(tunInbound["route_exclude_address"])
+		switch {
+		case excludeCIDRs(split):
+			tunInbound["route_exclude_address"] = mergeUnique(excl, split.IPCIDR)
+		case whitelistCIDRs(split):
+			tunInbound["route_exclude_address"] = dropOverlappingCIDRs(excl, split.IPCIDR)
 		}
 		tunRaw, err := json.Marshal(tunInbound)
 		if err != nil {
 			return "", fmt.Errorf("marshal tun inbound: %w", err)
 		}
 		inbounds = append(inbounds, json.RawMessage(tunRaw))
-	} else if len(split.IPCIDR) > 0 {
-		inbounds, err = appendRouteExcludes(inbounds, split.IPCIDR)
+	} else {
+		switch {
+		case excludeCIDRs(split):
+			inbounds, err = appendRouteExcludes(inbounds, split.IPCIDR)
+		case whitelistCIDRs(split):
+			inbounds, err = dropOverlappingExcludes(inbounds, split.IPCIDR)
+		}
 		if err != nil {
 			return "", err
 		}
@@ -143,12 +156,13 @@ func buildTUNInbound(cfg config.TUNConfig) map[string]any {
 //     use when building the auto_route routing table (without this the default
 //     routes that redirect browser traffic into TUN are not set up correctly on
 //     Windows)
-//   - prepends "direct" rules: ip_is_private (so private/loopback destinations
-//     never enter the tunnel), a process_name rule for sing-box's own
-//     connections (breaking the TUN loop for the proxy process itself), then
-//     the split-tun.json bypasses. When split lists domains, a sniff action
-//     goes first so domain_suffix can match the TLS SNI / HTTP Host. Direct
-//     rules use the explicit action: "route" form; the bare top-level
+//   - prepends route rules. Blacklist: ip_is_private → direct, then sing-box's
+//     own process, then the split-tun.json bypasses to direct. Whitelist:
+//     sing-box's own process, the listed entries → route.final, then a
+//     0.0.0.0/0 + ::/0 catch-all → direct. That catch-all sits in front of the
+//     user's own rules, so they do not match IP traffic. When split lists
+//     domains, a sniff action goes first so domain_suffix can match the TLS
+//     SNI / HTTP Host. Rules use action "route"; the bare top-level
 //     "outbound" form is deprecated.
 func injectSelfBypassRule(root map[string]json.RawMessage, processName string, split config.SplitTUN) error {
 	var route map[string]json.RawMessage
@@ -176,7 +190,7 @@ func injectSelfBypassRule(root map[string]json.RawMessage, processName string, s
 		}
 	}
 
-	prefix, err := bypassRules(processName, split)
+	prefix, err := bypassRules(processName, split, route)
 	if err != nil {
 		return err
 	}
@@ -199,7 +213,22 @@ func injectSelfBypassRule(root map[string]json.RawMessage, processName string, s
 // bypassRules returns the rules prepended to route.rules. Sniff is included
 // only when domains need it; otherwise an unconditional sniff would change
 // how the user's own later rules match.
-func bypassRules(processName string, split config.SplitTUN) ([]json.RawMessage, error) {
+func bypassRules(processName string, split config.SplitTUN, route map[string]json.RawMessage) ([]json.RawMessage, error) {
+	if !split.Active() {
+		split = config.SplitTUN{}
+	}
+	outbound := "direct"
+	whitelist := split.Whitelist()
+	// An empty whitelist still catch-alls to direct. route.final is only
+	// needed when some listed entry is actually sent there.
+	if whitelist && !split.Empty() {
+		final, err := routeFinal(route)
+		if err != nil {
+			return nil, err
+		}
+		outbound = final
+	}
+
 	var prefix []json.RawMessage
 	if len(split.DomainSuffix) > 0 {
 		sniff, err := json.Marshal(map[string]any{"action": "sniff"})
@@ -209,50 +238,120 @@ func bypassRules(processName string, split config.SplitTUN) ([]json.RawMessage, 
 		prefix = append(prefix, sniff)
 	}
 
-	private, err := directRule(map[string]any{"ip_is_private": true})
-	if err != nil {
-		return nil, err
+	// Whitelist matches must run before the private bypass, otherwise a listed
+	// private CIDR would always go direct. The catch-all below still sends
+	// every other private destination direct.
+	if !whitelist {
+		private, err := directRule(map[string]any{"ip_is_private": true})
+		if err != nil {
+			return nil, err
+		}
+		prefix = append(prefix, private)
 	}
 	self, err := directRule(map[string]any{"process_name": []string{processName}})
 	if err != nil {
 		return nil, err
 	}
-	prefix = append(prefix, private, self)
+	prefix = append(prefix, self)
 
-	if len(split.ProcessName) > 0 {
-		rule, err := directRule(map[string]any{"process_name": split.ProcessName})
+	lists := []struct {
+		key   string
+		items []string
+	}{
+		{"process_name", split.ProcessName},
+		{"process_path", split.ProcessPath},
+		{"ip_cidr", split.IPCIDR},
+		{"domain_suffix", split.DomainSuffix},
+	}
+	for _, list := range lists {
+		if len(list.items) == 0 {
+			continue
+		}
+		rule, err := routeRule(map[string]any{list.key: list.items}, outbound)
 		if err != nil {
 			return nil, err
 		}
 		prefix = append(prefix, rule)
 	}
-	if len(split.ProcessPath) > 0 {
-		rule, err := directRule(map[string]any{"process_path": split.ProcessPath})
+	if whitelist {
+		catchAll, err := directRule(map[string]any{"ip_cidr": []string{"0.0.0.0/0", "::/0"}})
 		if err != nil {
 			return nil, err
 		}
-		prefix = append(prefix, rule)
-	}
-	if len(split.IPCIDR) > 0 {
-		rule, err := directRule(map[string]any{"ip_cidr": split.IPCIDR})
-		if err != nil {
-			return nil, err
-		}
-		prefix = append(prefix, rule)
-	}
-	if len(split.DomainSuffix) > 0 {
-		rule, err := directRule(map[string]any{"domain_suffix": split.DomainSuffix})
-		if err != nil {
-			return nil, err
-		}
-		prefix = append(prefix, rule)
+		prefix = append(prefix, catchAll)
 	}
 	return prefix, nil
 }
 
+func routeFinal(route map[string]json.RawMessage) (string, error) {
+	raw, ok := route["final"]
+	if !ok {
+		return "", fmt.Errorf("split-tun whitelist: sing-box config has no route.final")
+	}
+	var tag string
+	if err := json.Unmarshal(raw, &tag); err != nil || strings.TrimSpace(tag) == "" {
+		return "", fmt.Errorf("split-tun whitelist: route.final is empty")
+	}
+	if tag == "direct" {
+		return "", fmt.Errorf("split-tun whitelist: route.final is %q", tag)
+	}
+	return tag, nil
+}
+
+func excludeCIDRs(s config.SplitTUN) bool {
+	return len(s.IPCIDR) > 0 && s.Active() && !s.Whitelist()
+}
+
+func whitelistCIDRs(s config.SplitTUN) bool {
+	return len(s.IPCIDR) > 0 && s.Whitelist()
+}
+
+// dropOverlappingCIDRs removes exclude prefixes that contain, or are contained
+// in, a whitelist prefix. Otherwise the default private excludes would drop a
+// listed LAN address before the route rule could send it to the proxy.
+func dropOverlappingCIDRs(exclude, allow []string) []string {
+	nets := parseCIDRNets(allow)
+	if len(nets) == 0 {
+		return exclude
+	}
+	out := make([]string, 0, len(exclude))
+	for _, raw := range exclude {
+		_, n, err := net.ParseCIDR(raw)
+		if err != nil || !overlapsAny(n, nets) {
+			out = append(out, raw)
+		}
+	}
+	return out
+}
+
+func parseCIDRNets(cidrs []string) []*net.IPNet {
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, raw := range cidrs {
+		_, n, err := net.ParseCIDR(raw)
+		if err != nil {
+			continue
+		}
+		nets = append(nets, n)
+	}
+	return nets
+}
+
+func overlapsAny(n *net.IPNet, allow []*net.IPNet) bool {
+	for _, a := range allow {
+		if n.Contains(a.IP) || a.Contains(n.IP) {
+			return true
+		}
+	}
+	return false
+}
+
 func directRule(match map[string]any) (json.RawMessage, error) {
+	return routeRule(match, "direct")
+}
+
+func routeRule(match map[string]any, outbound string) (json.RawMessage, error) {
 	match["action"] = "route"
-	match["outbound"] = "direct"
+	match["outbound"] = outbound
 	raw, err := json.Marshal(match)
 	if err != nil {
 		return nil, fmt.Errorf("marshal direct rule: %w", err)
@@ -280,6 +379,34 @@ func appendRouteExcludes(inbounds []json.RawMessage, cidrs []string) ([]json.Raw
 			return nil, fmt.Errorf("marshal route_exclude_address: %w", err)
 		}
 		inbound["route_exclude_address"] = merged
+		updated, err := json.Marshal(inbound)
+		if err != nil {
+			return nil, fmt.Errorf("marshal tun inbound: %w", err)
+		}
+		inbounds[i] = updated
+	}
+	return inbounds, nil
+}
+
+// dropOverlappingExcludes removes route_exclude_address prefixes that overlap
+// allow on each tun inbound. Other inbound fields are left as they were.
+func dropOverlappingExcludes(inbounds []json.RawMessage, allow []string) ([]json.RawMessage, error) {
+	for i, raw := range inbounds {
+		var inbound map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &inbound); err != nil {
+			return nil, fmt.Errorf("parse tun inbound: %w", err)
+		}
+		var existing []string
+		if excl, ok := inbound["route_exclude_address"]; ok && len(excl) > 0 && string(excl) != "null" {
+			if err := json.Unmarshal(excl, &existing); err != nil {
+				return nil, fmt.Errorf("parse route_exclude_address: %w", err)
+			}
+		}
+		kept, err := json.Marshal(dropOverlappingCIDRs(existing, allow))
+		if err != nil {
+			return nil, fmt.Errorf("marshal route_exclude_address: %w", err)
+		}
+		inbound["route_exclude_address"] = kept
 		updated, err := json.Marshal(inbound)
 		if err != nil {
 			return nil, fmt.Errorf("marshal tun inbound: %w", err)

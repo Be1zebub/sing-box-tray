@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Be1zebub/sing-box-tray-runner/internal/config"
+	"github.com/Be1zebub/sing-box-tray/internal/config"
 )
 
 // writeFixture writes a minimal sing-box config whose only inbound is not a
@@ -250,6 +250,152 @@ func TestInjectTUNSplitKeepsExistingTunInbound(t *testing.T) {
 	assertStringList(t, "last rule domain", rules[3]["domain_suffix"], []string{"keep.example"})
 	if rules[3]["outbound"] != "proxy" {
 		t.Errorf("original rule outbound = %v", rules[3]["outbound"])
+	}
+}
+
+func TestInjectTUNWhitelist(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	src := `{
+	  "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2080}],
+	  "outbounds": [{"type": "direct", "tag": "direct"}, {"type": "selector", "tag": "proxy"}],
+	  "route": {"final": "proxy", "rules": [{"domain_suffix": ["keep.example"], "action": "route", "outbound": "proxy"}]}
+	}`
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	split := config.SplitTUN{
+		Enabled:      true,
+		Mode:         config.SplitWhitelist,
+		IPCIDR:       []string{"1.2.3.4/32"},
+		DomainSuffix: []string{"example.com"},
+		ProcessName:  []string{"chrome.exe"},
+	}
+	out, err := InjectTUN(p, config.TUNConfig{}, "sing-box.exe", split)
+	if err != nil {
+		t.Fatalf("InjectTUN: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(out) })
+
+	got := readInjected(t, out)
+	in := tunInbound(t, got)
+	if slices.Contains(in.RouteExcludeAddress, "1.2.3.4/32") {
+		t.Errorf("whitelist ip must not be route_exclude_address: %v", in.RouteExcludeAddress)
+	}
+	rules := got.Route.Rules
+	if len(rules) != 7 {
+		t.Fatalf("want sniff + self + 3 matches + catch-all + original, got %d: %v", len(rules), rules)
+	}
+	if rules[0]["action"] != "sniff" {
+		t.Errorf("rules[0] = %v", rules[0])
+	}
+	if rules[1]["ip_is_private"] == true {
+		t.Fatal("private bypass must not precede whitelist matches")
+	}
+	assertStringList(t, "process", rules[2]["process_name"], []string{"chrome.exe"})
+	if rules[2]["outbound"] != "proxy" {
+		t.Errorf("whitelist outbound = %v", rules[2]["outbound"])
+	}
+	assertStringList(t, "ip", rules[3]["ip_cidr"], []string{"1.2.3.4/32"})
+	assertStringList(t, "domain", rules[4]["domain_suffix"], []string{"example.com"})
+	assertStringList(t, "catch-all", rules[5]["ip_cidr"], []string{"0.0.0.0/0", "::/0"})
+	if rules[5]["outbound"] != "direct" {
+		t.Errorf("catch-all outbound = %v", rules[5]["outbound"])
+	}
+	assertStringList(t, "original", rules[6]["domain_suffix"], []string{"keep.example"})
+}
+
+func TestInjectTUNEmptyWhitelistIsDirect(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	src := `{
+	  "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2080}],
+	  "outbounds": [{"type": "direct", "tag": "direct"}],
+	  "route": {"rules": [{"domain_suffix": ["keep.example"], "action": "route", "outbound": "proxy"}]}
+	}`
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	out, err := InjectTUN(p, config.TUNConfig{}, "sing-box.exe", config.SplitTUN{
+		Enabled: true,
+		Mode:    config.SplitWhitelist,
+	})
+	if err != nil {
+		t.Fatalf("empty whitelist must not require route.final: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(out) })
+
+	rules := readInjected(t, out).Route.Rules
+	if len(rules) != 3 {
+		t.Fatalf("want self + catch-all + original, got %d: %v", len(rules), rules)
+	}
+	if rules[0]["ip_is_private"] == true {
+		t.Fatal("empty whitelist must not keep the private bypass ahead of the catch-all")
+	}
+	assertStringList(t, "catch-all", rules[1]["ip_cidr"], []string{"0.0.0.0/0", "::/0"})
+	if rules[1]["outbound"] != "direct" {
+		t.Errorf("catch-all outbound = %v", rules[1]["outbound"])
+	}
+}
+
+func TestInjectTUNWhitelistDropsOverlappingExclude(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	src := `{
+	  "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2080}],
+	  "outbounds": [{"type": "direct", "tag": "direct"}, {"type": "selector", "tag": "proxy"}],
+	  "route": {"final": "proxy"}
+	}`
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	out, err := InjectTUN(p, config.TUNConfig{}, "sing-box.exe", config.SplitTUN{
+		Enabled: true,
+		Mode:    config.SplitWhitelist,
+		IPCIDR:  []string{"10.1.2.3/32"},
+	})
+	if err != nil {
+		t.Fatalf("InjectTUN: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(out) })
+
+	excl := tunInbound(t, readInjected(t, out)).RouteExcludeAddress
+	if slices.Contains(excl, "10.0.0.0/8") {
+		t.Errorf("whitelist 10.1.2.3/32 must punch out 10.0.0.0/8, got %v", excl)
+	}
+	if !slices.Contains(excl, "192.168.0.0/16") || !slices.Contains(excl, "127.0.0.0/8") {
+		t.Errorf("unrelated excludes were dropped: %v", excl)
+	}
+}
+
+func TestInjectTUNWhitelistDropsExcludeOnExistingInbound(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	src := `{
+	  "inbounds": [{
+	    "type": "tun",
+	    "tag": "my-tun",
+	    "address": ["172.19.0.1/30"],
+	    "route_exclude_address": ["10.0.0.0/8", "1.2.3.4/32"]
+	  }],
+	  "outbounds": [{"type": "direct", "tag": "direct"}, {"type": "selector", "tag": "proxy"}],
+	  "route": {"final": "proxy"}
+	}`
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	out, err := InjectTUN(p, config.TUNConfig{}, "sing-box.exe", config.SplitTUN{
+		Enabled: true,
+		Mode:    config.SplitWhitelist,
+		IPCIDR:  []string{"10.1.2.3/32"},
+	})
+	if err != nil {
+		t.Fatalf("InjectTUN: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(out) })
+
+	excl := tunInbound(t, readInjected(t, out)).RouteExcludeAddress
+	if slices.Contains(excl, "10.0.0.0/8") {
+		t.Errorf("overlapping exclude kept: %v", excl)
+	}
+	if !slices.Contains(excl, "1.2.3.4/32") {
+		t.Errorf("unrelated exclude dropped: %v", excl)
 	}
 }
 

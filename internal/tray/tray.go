@@ -4,6 +4,7 @@ package tray
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,28 +18,26 @@ import (
 	"github.com/go-toast/toast"
 	"golang.org/x/sys/windows"
 
-	"github.com/Be1zebub/sing-box-tray-runner/assets"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/aboutwin"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/autostart"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/clashapi"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/config"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/elevation"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/i18n"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/logbuf"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/process"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/proxy"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/settings"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/state"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/tun"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/version"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/watcher"
+	"github.com/Be1zebub/sing-box-tray/assets"
+	"github.com/Be1zebub/sing-box-tray/internal/abouttui"
+	"github.com/Be1zebub/sing-box-tray/internal/autostart"
+	"github.com/Be1zebub/sing-box-tray/internal/clashapi"
+	"github.com/Be1zebub/sing-box-tray/internal/config"
+	"github.com/Be1zebub/sing-box-tray/internal/elevation"
+	"github.com/Be1zebub/sing-box-tray/internal/i18n"
+	"github.com/Be1zebub/sing-box-tray/internal/logbuf"
+	"github.com/Be1zebub/sing-box-tray/internal/process"
+	"github.com/Be1zebub/sing-box-tray/internal/proxy"
+	"github.com/Be1zebub/sing-box-tray/internal/state"
+	"github.com/Be1zebub/sing-box-tray/internal/tun"
+	"github.com/Be1zebub/sing-box-tray/internal/watcher"
 )
 
 const (
 	appTitle = "sing-box-tray"
 
 	// repoURL is this fork's own repository, shown in the About window.
-	repoURL = "https://github.com/Be1zebub/sing-box-tray-runner"
+	repoURL = "https://github.com/Be1zebub/sing-box-tray"
 
 	// languagesMenuTitle is deliberately not translated — it's the control
 	// that changes the language, so it must stay findable regardless of the
@@ -61,7 +60,6 @@ var (
 )
 
 type menuItems struct {
-	settings  *systray.MenuItem
 	start     *systray.MenuItem
 	stop      *systray.MenuItem
 	restart   *systray.MenuItem
@@ -77,6 +75,7 @@ type menuItems struct {
 	openConfigFile   *systray.MenuItem
 	openConfigFolder *systray.MenuItem
 	openSplitTUN     *systray.MenuItem
+	openImporter     *systray.MenuItem
 	proxy            *systray.MenuItem
 
 	langAuto *systray.MenuItem
@@ -107,7 +106,7 @@ type App struct {
 	st           *state.Manager
 	proc         *process.Manager
 	logBuf       *logbuf.Buffer
-	logFile      *os.File
+	logFile      io.Closer
 	releaseMutex func()
 	strs         i18n.Strings
 
@@ -119,8 +118,14 @@ type App struct {
 	configDirWatcher *watcher.DirWatcher
 
 	proxyParent *systray.MenuItem
+	proxyStatus *systray.MenuItem
 	proxyGroups []proxyMenuGroup
 	proxyShape  string
+	proxyLeaf   string
+	proxyVia    string
+	proxyPing   int
+	pingGen     int
+	pingBusy    bool
 }
 
 func NewApp(cfg *config.TrayConfig, exeDir string, initialMode state.ProxyMode, releaseMutex func(), strs i18n.Strings) *App {
@@ -134,7 +139,7 @@ func NewApp(cfg *config.TrayConfig, exeDir string, initialMode state.ProxyMode, 
 	}
 
 	logPath := filepath.Join(exeDir, "sing-box-tray.log")
-	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+	if f, err := logbuf.OpenRolling(logPath); err == nil {
 		a.logFile = f
 		a.logBuf.SetFileOutput(f)
 	}
@@ -147,6 +152,8 @@ func NewApp(cfg *config.TrayConfig, exeDir string, initialMode state.ProxyMode, 
 	a.log("config:       %s", cfg.ActiveConfigPath())
 	a.log("default mode: %s", cfg.DefaultMode)
 	a.log("initial mode: %s", initialMode)
+	a.log("split-tun:    %s", config.SplitTUNPath(exeDir))
+	a.proxyPing = -1
 
 	return a
 }
@@ -159,8 +166,6 @@ func (a *App) OnReady() {
 	systray.SetIcon(assets.IconGrey)
 	systray.SetTooltip(a.strs.TooltipStopped)
 
-	mSettings := systray.AddMenuItem(a.strs.MenuSettings, a.strs.MenuSettingsTip)
-	systray.AddSeparator()
 	mStart := systray.AddMenuItem(a.strs.MenuStart, a.strs.MenuStartTip)
 	mStop := systray.AddMenuItem(a.strs.MenuStop, a.strs.MenuStopTip)
 	mRestart := systray.AddMenuItem(a.strs.MenuRestart, a.strs.MenuRestartTip)
@@ -177,7 +182,11 @@ func (a *App) OnReady() {
 	mOpenConfigFile := systray.AddMenuItem(a.strs.MenuOpenConfigFile, "")
 	mOpenConfigFolder := systray.AddMenuItem(a.strs.MenuOpenConfigFolder, "")
 	mOpenSplitTUN := systray.AddMenuItem(a.strs.MenuOpenSplitTUN, "")
+	mOpenImporter := systray.AddMenuItem(a.strs.MenuOpenImporter, "")
 	mProxy := systray.AddMenuItem(a.strs.MenuProxy, "")
+	mProxyStatus := mProxy.AddSubMenuItem("—", "")
+	mProxyStatus.Disable()
+	mProxyStatus.Hide()
 	mProxy.Disable() // enabled once the Clash API answers
 	systray.AddSeparator()
 
@@ -209,8 +218,10 @@ func (a *App) OnReady() {
 	setModeChecks(mModeOff, mModeProxy, mModeTUN, mode)
 	setLanguageChecks(mLangAuto, mLangEN, mLangRU, mLangUA, a.cfg.Language)
 
+	a.proxyParent = mProxy
+	a.proxyStatus = mProxyStatus
+
 	a.items = menuItems{
-		settings:  mSettings,
 		start:     mStart,
 		stop:      mStop,
 		restart:   mRestart,
@@ -226,6 +237,7 @@ func (a *App) OnReady() {
 		openConfigFile:   mOpenConfigFile,
 		openConfigFolder: mOpenConfigFolder,
 		openSplitTUN:     mOpenSplitTUN,
+		openImporter:     mOpenImporter,
 		proxy:            mProxy,
 
 		langAuto: mLangAuto,
@@ -240,8 +252,6 @@ func (a *App) OnReady() {
 		about:     mAbout,
 		quit:      mQuit,
 	}
-
-	a.proxyParent = mProxy
 
 	go a.watchState()
 	go a.handleClicks()
@@ -473,8 +483,7 @@ func (a *App) buildConfigItems(parent *systray.MenuItem, dir string) (items []*s
 	return items, names
 }
 
-// rebuildConfigMenu re-scans dir (called when Settings changes ConfigDir)
-// and replaces the Config submenu's items. getlantern/systray has no API to
+// rebuildConfigMenu re-scans dir and replaces the Config submenu's items. getlantern/systray has no API to
 // remove a menu item, so the old ones are just hidden rather than reused.
 func (a *App) rebuildConfigMenu(dir string) {
 	a.mu.Lock()
@@ -501,9 +510,12 @@ func (a *App) prepareConfig(mode state.ProxyMode) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("load split-tun.json: %w", err)
 		}
-		if !split.Empty() {
-			a.log("split-tun: %d ip, %d domain, %d process name, %d process path",
-				len(split.IPCIDR), len(split.DomainSuffix), len(split.ProcessName), len(split.ProcessPath))
+		switch {
+		case !split.Active():
+			a.log("split-tun: disabled")
+		case !split.Empty():
+			a.log("split-tun: %s, %d ip, %d domain, %d process name, %d process path",
+				split.Mode, len(split.IPCIDR), len(split.DomainSuffix), len(split.ProcessName), len(split.ProcessPath))
 		}
 		tmpPath, err := tun.InjectTUN(a.cfg.ActiveConfigPath(), a.cfg.TUN, a.cfg.SingBoxPath, split)
 		if err != nil {
@@ -640,11 +652,69 @@ func (a *App) checkFirstRunDeps() {
 	}
 }
 
-// showAbout displays the tray launcher version plus a clickable link to the
-// project repository. A plain MessageBox can't have a clickable link, so this
-// opens a small walk window (aboutwin) instead of using infoBox.
+// showAbout opens the console splash in Windows Terminal. The tray binary is a
+// GUI app, so the tab runs cmd and the splash attaches to that console.
+// Without Terminal it falls back to conhost.
 func (a *App) showAbout() {
-	aboutwin.Show(a.strs, appTitle, version.Version, repoURL)
+	exe, err := os.Executable()
+	if err != nil {
+		a.log("about: %s", err)
+		return
+	}
+	a.mu.Lock()
+	leaf, via, ping := a.proxyLeaf, a.proxyVia, a.proxyPing
+	a.mu.Unlock()
+	_, mode := a.st.Get()
+	snap := fmt.Sprintf(`{"mode":%q,"proxy":%q,"via":%q,"ping":%d,"config":%q}`,
+		a.tooltipMode(mode), leaf, via, ping, a.cfg.SelectedConfig)
+	// Two cmd layers (the start launcher and the tab shell) each expand %.
+	tab := fmt.Sprintf(`cmd.exe /c ""%s" %s %s"`,
+		escapeCmdPercent(exe, 2), abouttui.FlagWT, abouttui.EncodeSnapshot(snap))
+	if err := a.startWindowsTerminal(appTitle, tab); err != nil {
+		a.log("about: windows terminal: %s", err)
+	} else {
+		return
+	}
+	// conhost has no OSC 8 clicks. Quick Edit is turned off in that process so
+	// a click does not freeze it in mark mode. Empty title: start treats the
+	// first quoted string as a window title. The snapshot rides on argv because
+	// a de-elevated child does not inherit this process's environment.
+	fallback := fmt.Sprintf(`cmd.exe /c start "" %s %s %s`,
+		cmdQuote(escapeCmdPercent(exe, 1)), abouttui.Flag, abouttui.EncodeSnapshot(snap))
+	if _, err := a.startDropAdmin(fallback); err != nil {
+		a.log("about: %s", err)
+	}
+}
+
+// startWindowsTerminal opens a tab running tabCommand. The launch goes through
+// cmd's start: wt.exe in WindowsApps is an app-execution alias, and
+// CreateProcess on that alias fails from an elevated tray. start uses
+// ShellExecute, which can activate it. tabCommand is the raw tail after
+// --title, for example a cmd.exe /c line or powershell.exe.
+func (a *App) startWindowsTerminal(title, tabCommand string) error {
+	line := `cmd.exe /c start "" wt.exe new-tab --title ` + cmdQuote(title) + ` ` + tabCommand
+	_, err := a.startDropAdmin(line)
+	return err
+}
+
+func (a *App) startDropAdmin(commandLine string) (bool, error) {
+	elevated, err := elevation.StartDropAdmin(commandLine)
+	if elevated {
+		a.log("terminal: could not drop admin rights")
+	}
+	return elevated, err
+}
+
+func cmdQuote(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// escapeCmdPercent doubles % once per cmd.exe that will parse the string.
+func escapeCmdPercent(s string, layers int) string {
+	for i := 0; i < layers; i++ {
+		s = strings.ReplaceAll(s, "%", "%%")
+	}
+	return s
 }
 
 // openActiveConfig opens the currently selected sing-box config in whatever
@@ -678,6 +748,26 @@ func (a *App) openSplitTUN() {
 	}
 }
 
+// openConfigImporter starts config-importer.exe from the tray directory.
+// It is a console TUI, so it opens in Windows Terminal.
+func (a *App) openConfigImporter() {
+	path := filepath.Join(a.exeDir, "config-importer.exe")
+	if _, err := os.Stat(path); err != nil {
+		a.log("config-importer missing at %s", path)
+		infoBox(fmt.Sprintf(a.strs.DialogMissingImporterFmt, path), appTitle)
+		return
+	}
+	tab := cmdQuote(escapeCmdPercent(path, 1))
+	if err := a.startWindowsTerminal("config-importer", tab); err != nil {
+		a.log("config-importer: windows terminal: %s", err)
+		fallback := fmt.Sprintf(`cmd.exe /c start "" %s`, cmdQuote(escapeCmdPercent(path, 1)))
+		if _, err := a.startDropAdmin(fallback); err != nil {
+			a.log("open config-importer failed: %s", err)
+			infoBox(fmt.Sprintf(a.strs.DialogErrorFmt, err), appTitle)
+		}
+	}
+}
+
 // openConfigDir opens the config folder in Explorer. explorer.exe is spawned
 // directly instead of via ShellExecuteW for the same elevated-shell reason as
 // above; when handed a directory it does exactly what "explore" would.
@@ -694,12 +784,17 @@ func (a *App) openConfigDir() {
 // update (which flickered). The tail length reuses the log_lines setting.
 func (a *App) openLogTerminal() {
 	logPath := filepath.Join(a.exeDir, "sing-box-tray.log")
-	script := fmt.Sprintf("Get-Content -Wait -Tail %d -LiteralPath '%s'", a.cfg.LogLines, logPath)
-	cmd := exec.Command("cmd", "/c", "start", a.strs.LogWindowTitle,
-		"powershell", "-NoExit", "-NoLogo", "-Command", script)
-	if err := cmd.Start(); err != nil {
-		a.log("open log terminal failed: %s", err)
-		infoBox(fmt.Sprintf(a.strs.DialogErrorFmt, err), appTitle)
+	script := fmt.Sprintf("Get-Content -Wait -Tail %d -LiteralPath '%s'",
+		a.cfg.LogLines, strings.ReplaceAll(escapeCmdPercent(logPath, 1), "'", "''"))
+	tab := fmt.Sprintf(`powershell.exe -NoExit -NoLogo -Command "%s"`, script)
+	if err := a.startWindowsTerminal(a.strs.LogWindowTitle, tab); err != nil {
+		a.log("open log terminal: windows terminal: %s", err)
+		fallback := fmt.Sprintf(`cmd.exe /c start %s powershell -NoExit -NoLogo -Command "%s"`,
+			cmdQuote(a.strs.LogWindowTitle), script)
+		if _, err := a.startDropAdmin(fallback); err != nil {
+			a.log("open log terminal failed: %s", err)
+			infoBox(fmt.Sprintf(a.strs.DialogErrorFmt, err), appTitle)
+		}
 	}
 }
 
@@ -779,7 +874,7 @@ func (a *App) refreshProxyMenu() {
 		a.clearProxyMenu()
 		return
 	}
-	groups, err := a.proxyClient().Groups()
+	groups, defaultTag, err := a.proxyClient().Groups()
 	if err != nil {
 		// Unreachable (still starting, wrong port, secret mismatch): just
 		// leave the submenu disabled rather than logging every tick.
@@ -788,9 +883,11 @@ func (a *App) refreshProxyMenu() {
 	}
 	if a.proxySignature(groups) != a.proxyShape {
 		a.buildProxyMenu(groups)
-		return
+	} else {
+		a.syncProxyChecks(groups)
 	}
-	a.syncProxyChecks(groups)
+	leaf, via := clashapi.ActiveRoute(defaultTag, groups)
+	go a.measurePing(leaf, via)
 }
 
 // proxySignature captures everything the submenu renders, so a new group, a new
@@ -819,7 +916,18 @@ func (a *App) clearProxyMenu() {
 	}
 	a.proxyGroups = nil
 	a.proxyShape = ""
+	a.mu.Lock()
+	a.pingGen++
+	a.proxyLeaf = ""
+	a.proxyVia = ""
+	a.proxyPing = -1
+	a.mu.Unlock()
+	if a.proxyStatus != nil {
+		a.proxyStatus.Hide()
+	}
 	a.proxyParent.Disable()
+	appState, mode := a.st.Get()
+	a.applyTooltip(appState, mode)
 }
 
 // buildProxyMenu rebuilds the Proxy submenu from the Clash API. Selector groups
@@ -868,6 +976,10 @@ func (a *App) buildProxyMenu(groups []clashapi.Group) {
 	}
 	a.proxyShape = a.proxySignature(groups)
 	a.proxyParent.Enable()
+	if a.proxyStatus != nil {
+		a.proxyStatus.Show()
+		a.proxyStatus.Disable()
+	}
 }
 
 // selectProxy switches a selector group to member and refreshes the checks.
@@ -898,8 +1010,7 @@ func (a *App) syncProxyChecks(groups []clashapi.Group) {
 }
 
 // applyLanguage recomputes a.strs for langCode, retitles the menu, and
-// refreshes the dynamic tooltip/icon. Shared by the tray Languages submenu
-// and the Settings window's Save handler.
+// refreshes the dynamic tooltip/icon.
 func (a *App) applyLanguage(langCode string) {
 	a.strs = i18n.Get(i18n.Resolve(langCode))
 	a.refreshMenuTexts()
@@ -925,8 +1036,6 @@ func (a *App) switchLanguage(langCode string) {
 // after a live language switch. Items with literal (untranslated) labels —
 // proper nouns and the Languages picker itself — are left alone.
 func (a *App) refreshMenuTexts() {
-	a.items.settings.SetTitle(a.strs.MenuSettings)
-	a.items.settings.SetTooltip(a.strs.MenuSettingsTip)
 	a.items.start.SetTitle(a.strs.MenuStart)
 	a.items.start.SetTooltip(a.strs.MenuStartTip)
 	a.items.stop.SetTitle(a.strs.MenuStop)
@@ -941,53 +1050,13 @@ func (a *App) refreshMenuTexts() {
 	a.items.openConfigFile.SetTitle(a.strs.MenuOpenConfigFile)
 	a.items.openConfigFolder.SetTitle(a.strs.MenuOpenConfigFolder)
 	a.items.openSplitTUN.SetTitle(a.strs.MenuOpenSplitTUN)
+	a.items.openImporter.SetTitle(a.strs.MenuOpenImporter)
 	a.items.proxy.SetTitle(a.strs.MenuProxy)
 	a.items.autostart.SetTitle(a.strs.MenuAutostart)
 	a.items.autostart.SetTooltip(a.strs.MenuAutostartTip)
 	a.items.viewLogs.SetTitle(a.strs.MenuViewLogs)
 	a.items.about.SetTitle(a.strs.MenuAbout)
 	a.items.quit.SetTitle(a.strs.MenuExit)
-}
-
-func (a *App) openSettings() {
-	prevLang := a.cfg.Language
-	prevConfigDir := a.cfg.ConfigDir
-	prevSelectedConfig := a.cfg.SelectedConfig
-	prevAutostart := autostart.IsEnabled()
-	settings.Show(a.cfg, a.strs, a.items.configNames, prevAutostart, func(updated *config.TrayConfig) {
-		a.log("settings saved: sing-box=%s config=%s", updated.SingBoxPath, updated.ActiveConfigPath())
-		a.proc.SetSingBoxPath(updated.SingBoxPath)
-		if updated.Autostart != prevAutostart {
-			// toggleAutostart flips whatever autostart.IsEnabled() currently
-			// reports, which is still prevAutostart here — nothing else can
-			// have changed it between the two reads.
-			a.toggleAutostart()
-		}
-		// Re-read the real Task Scheduler state rather than trusting the
-		// checkbox value: if toggleAutostart's schtasks call failed, it
-		// already showed an error dialog, but updated.Autostart still holds
-		// the user's requested (unapplied) value — persisting that would
-		// silently drift tray-config.json away from reality.
-		updated.Autostart = autostart.IsEnabled()
-		checkOrUncheck(a.items.autostart, updated.Autostart)
-		if err := updated.Save(a.exeDir); err != nil {
-			a.log("save settings: %s", err)
-		}
-		if updated.Language != prevLang {
-			a.applyLanguage(updated.Language)
-		}
-		switch {
-		case updated.ConfigDir != prevConfigDir:
-			// The folder itself changed, so the submenu's items no longer
-			// match what's on disk — rescan and rebuild it.
-			a.rebuildConfigMenu(updated.ConfigDir)
-			a.restartConfigWatcher()
-			a.restartConfigDirWatcher()
-		case updated.SelectedConfig != prevSelectedConfig:
-			setConfigChecks(a.items.configItems, a.items.configNames, updated.SelectedConfig)
-			a.restartConfigWatcher()
-		}
-	})
 }
 
 func checkOrUncheck(item *systray.MenuItem, checked bool) {
@@ -1007,7 +1076,7 @@ func (a *App) restartConfigWatcher() {
 	if a.configWatcher != nil {
 		a.configWatcher.Stop()
 	}
-	paths := []string{a.cfg.ActiveConfigPath(), filepath.Join(a.exeDir, "tray-config.json")}
+	paths := []string{a.cfg.ActiveConfigPath(), a.cfg.FilePath()}
 	w := watcher.New(paths, func(path string) {
 		a.log("file changed: %s", path)
 		appState, _ := a.st.Get()
@@ -1027,8 +1096,8 @@ func (a *App) restartConfigWatcher() {
 // restartConfigDirWatcher (re)starts a watcher that rebuilds the Config
 // submenu whenever the set of *.json files in ConfigDir changes — e.g. the
 // user drops a new sing-box config into the folder while the tray is
-// running. Called from OnReady and again whenever ConfigDir is changed via
-// Settings, since the previous watcher was still watching the old folder.
+// running. Called from OnReady. The previous watcher is stopped first, so a
+// later caller can point it at a new folder.
 func (a *App) restartConfigDirWatcher() {
 	a.mu.Lock()
 	if a.configDirWatcher != nil {
@@ -1078,20 +1147,126 @@ func (a *App) updateUI(appState state.AppState, mode state.ProxyMode) {
 	switch appState {
 	case state.StateRunning:
 		systray.SetIcon(assets.IconGreen)
-		systray.SetTooltip(fmt.Sprintf(a.strs.TooltipRunningFmt, a.modeLabel(mode)))
 	case state.StateCrashed:
 		systray.SetIcon(assets.IconRed)
-		systray.SetTooltip(a.strs.TooltipCrashed)
 	default:
 		systray.SetIcon(assets.IconGrey)
-		systray.SetTooltip(a.strs.TooltipStopped)
 	}
+	a.applyTooltip(appState, mode)
 
 	setModeChecks(a.items.modeOff, a.items.modeProxy, a.items.modeTUN, mode)
 }
 
-// modeLabel returns the localized display name for mode.
-func (a *App) modeLabel(mode state.ProxyMode) string {
+// measurePing records the active node immediately, then probes its delay.
+// A probe already in flight is left alone; when it finishes a newer generation
+// starts the probe for whatever is current.
+func (a *App) measurePing(leaf, via string) {
+	a.mu.Lock()
+	same := leaf == a.proxyLeaf && via == a.proxyVia
+	if same && leaf != "" && a.proxyPing >= 0 {
+		a.mu.Unlock()
+		return
+	}
+	if !same {
+		a.proxyPing = -1
+	}
+	a.pingGen++
+	gen := a.pingGen
+	a.proxyLeaf = leaf
+	a.proxyVia = via
+	if a.proxyPing < 0 || leaf == "" {
+		a.proxyPing = -1
+	}
+	shown := a.proxyPing
+	startProbe := clashapi.Probeable(leaf, via) && !a.pingBusy
+	if startProbe {
+		a.pingBusy = true
+	}
+	a.mu.Unlock()
+
+	a.paintProxyStatus(leaf, shown)
+	appState, mode := a.st.Get()
+	a.applyTooltip(appState, mode)
+	if !startProbe {
+		return
+	}
+
+	ping := -1
+	if ms, err := a.proxyClient().Delay(leaf); err != nil {
+		a.log("proxy delay %s: %s", leaf, err)
+	} else {
+		ping = ms
+	}
+
+	a.mu.Lock()
+	a.pingBusy = false
+	stale := a.pingGen != gen
+	if !stale {
+		a.proxyPing = ping
+		leaf, via = a.proxyLeaf, a.proxyVia
+	} else {
+		leaf, via = a.proxyLeaf, a.proxyVia
+	}
+	a.mu.Unlock()
+
+	if stale {
+		if leaf != "" {
+			a.measurePing(leaf, via)
+		}
+		return
+	}
+	a.paintProxyStatus(leaf, ping)
+	appState, mode = a.st.Get()
+	a.applyTooltip(appState, mode)
+}
+
+func (a *App) paintProxyStatus(leaf string, ping int) {
+	if a.proxyStatus == nil || leaf == "" {
+		return
+	}
+	title := leaf
+	if ping >= 0 {
+		title = fmt.Sprintf("%s · %dms", leaf, ping)
+	}
+	a.proxyStatus.SetTitle(title)
+	a.proxyStatus.Show()
+	a.proxyStatus.Disable()
+}
+
+func (a *App) applyTooltip(appState state.AppState, mode state.ProxyMode) {
+	a.mu.Lock()
+	leaf, via, ping := a.proxyLeaf, a.proxyVia, a.proxyPing
+	a.mu.Unlock()
+
+	var status string
+	switch appState {
+	case state.StateRunning:
+		status = a.strs.StatusRunning
+	case state.StateCrashed:
+		status = a.strs.StatusCrashed
+	case state.StateStarting:
+		status = a.strs.StatusStarting
+	case state.StateStopping:
+		status = a.strs.StatusStopping
+	default:
+		status = a.strs.StatusStopped
+	}
+	modeName := a.tooltipMode(mode)
+	if appState != state.StateRunning || leaf == "" {
+		systray.SetTooltip(status + ", " + modeName)
+		return
+	}
+	tip := fmt.Sprintf("%s, %s, %s", status, modeName, leaf)
+	if via != "" && via != leaf {
+		tip += " | " + via
+	}
+	if ping >= 0 {
+		tip += fmt.Sprintf(", %dms", ping)
+	}
+	systray.SetTooltip(tip)
+}
+
+func (a *App) tooltipMode(mode state.ProxyMode) string {
 	switch mode {
 	case state.ModeSystemProxy:
 		return a.strs.ModeSystemProxy
@@ -1105,8 +1280,6 @@ func (a *App) modeLabel(mode state.ProxyMode) string {
 func (a *App) handleClicks() {
 	for {
 		select {
-		case <-a.items.settings.ClickedCh:
-			a.openSettings()
 		case <-a.items.start.ClickedCh:
 			go a.start()
 		case <-a.items.stop.ClickedCh:
@@ -1125,6 +1298,8 @@ func (a *App) handleClicks() {
 			go a.openConfigDir()
 		case <-a.items.openSplitTUN.ClickedCh:
 			go a.openSplitTUN()
+		case <-a.items.openImporter.ClickedCh:
+			go a.openConfigImporter()
 		case <-a.items.langAuto.ClickedCh:
 			go a.switchLanguage("auto")
 		case <-a.items.langEN.ClickedCh:

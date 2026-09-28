@@ -1,4 +1,4 @@
-module github.com/Be1zebub/sing-box-tray-runner
+module github.com/Be1zebub/sing-box-tray
 
 go 1.26.0
 

@@ -4,11 +4,15 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-OUTPUT="build/sing_box_tray_runner.exe"
+OUTPUT="build/sing-box-tray.exe"
+
+if [ -z "${VERSION:-}" ]; then
+	VERSION="$(git describe --tags --always --dirty 2>/dev/null || true)"
+fi
 
 LDFLAGS="-H windowsgui -s -w"
 if [ -n "${VERSION:-}" ]; then
-	LDFLAGS="$LDFLAGS -X github.com/Be1zebub/sing-box-tray-runner/internal/version.Version=$VERSION"
+	LDFLAGS="$LDFLAGS -X github.com/Be1zebub/sing-box-tray/internal/version.Version=$VERSION"
 fi
 
 mkdir -p build

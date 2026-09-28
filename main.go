@@ -12,16 +12,23 @@ import (
 	"github.com/getlantern/systray"
 	"golang.org/x/sys/windows"
 
-	"github.com/Be1zebub/sing-box-tray-runner/internal/config"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/elevation"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/i18n"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/state"
-	"github.com/Be1zebub/sing-box-tray-runner/internal/tray"
+	"github.com/Be1zebub/sing-box-tray/internal/abouttui"
+	"github.com/Be1zebub/sing-box-tray/internal/config"
+	"github.com/Be1zebub/sing-box-tray/internal/elevation"
+	"github.com/Be1zebub/sing-box-tray/internal/i18n"
+	"github.com/Be1zebub/sing-box-tray/internal/state"
+	"github.com/Be1zebub/sing-box-tray/internal/tray"
+	"github.com/Be1zebub/sing-box-tray/internal/winmenu"
 )
 
 const mutexName = "Global\\SingBoxTray"
 
 func main() {
+	if abouttui.WantsRun(os.Args) {
+		abouttui.Run()
+		return
+	}
+
 	forceMode := flag.String("force-mode", "", "override default_mode from config (used after UAC re-launch)")
 	flag.Parse()
 
@@ -78,6 +85,7 @@ func main() {
 	}
 
 	app := tray.NewApp(cfg, exeDir, initialMode, releaseMutex, strs)
+	winmenu.FollowSystem()
 	systray.Run(app.OnReady, app.OnExit)
 }
 

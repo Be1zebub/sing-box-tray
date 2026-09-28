@@ -19,6 +19,9 @@ func TestLoadSplitTUNMissingWritesEmptyTemplate(t *testing.T) {
 	if !got.Empty() {
 		t.Fatalf("missing file should load as empty, got %+v", got)
 	}
+	if !got.Enabled || got.Mode != SplitBlacklist {
+		t.Fatalf("default mode = enabled:%v mode:%s", got.Enabled, got.Mode)
+	}
 	if _, err := os.Stat(filepath.Join(dir, splitTunFile)); err != nil {
 		t.Fatalf("default split-tun.json was not written: %v", err)
 	}
@@ -52,13 +55,54 @@ func TestLoadSplitTUNNormalizesEntries(t *testing.T) {
 	if !slices.Equal(got.ProcessPath, []string{`C:\Games\Game.exe`}) {
 		t.Errorf("process_path = %v", got.ProcessPath)
 	}
+	if !got.Enabled || got.Mode != SplitBlacklist {
+		t.Errorf("enabled=%v mode=%s", got.Enabled, got.Mode)
+	}
+}
+
+func TestLoadSplitTUNMode(t *testing.T) {
+	dir := t.TempDir()
+	body := `{
+	  "enabled": true,
+	  "mode": "Whitelist",
+	  "process_name": ["chrome.exe"],
+	  "_example": {"mode": "blacklist", "process_name": ["ignored.exe"]}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, splitTunFile), []byte(body), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := LoadSplitTUN(dir)
+	if err != nil {
+		t.Fatalf("LoadSplitTUN: %v", err)
+	}
+	if got.Mode != SplitWhitelist || !got.Enabled {
+		t.Fatalf("mode = %s enabled = %v", got.Mode, got.Enabled)
+	}
+	if !slices.Equal(got.ProcessName, []string{"chrome.exe"}) {
+		t.Fatalf("process_name = %v", got.ProcessName)
+	}
+
+	off := `{"enabled": false, "mode": "blacklist", "ip_cidr": ["1.1.1.1"]}`
+	if err := os.WriteFile(filepath.Join(dir, splitTunFile), []byte(off), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err = LoadSplitTUN(dir)
+	if err != nil {
+		t.Fatalf("LoadSplitTUN: %v", err)
+	}
+	if got.Active() {
+		t.Fatal("enabled false should be inactive")
+	}
+	if !slices.Equal(got.IPCIDR, []string{"1.1.1.1/32"}) {
+		t.Fatalf("disabled file should still parse lists, got %v", got.IPCIDR)
+	}
 }
 
 func TestLoadSplitTUNRejectsBadEntries(t *testing.T) {
 	cases := []string{
 		`{"ip_cidr":["not-an-ip"]}`,
 		`{"domain_suffix":["https://example.com/a"]}`,
-		`{`,
+		`{"mode":"bypass"}`,
 	}
 	for _, body := range cases {
 		t.Run(body, func(t *testing.T) {

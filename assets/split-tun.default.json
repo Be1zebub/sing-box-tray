@@ -1,6 +1,19 @@
 {
-  "ip_cidr": [],
-  "domain_suffix": [],
-  "process_name": [],
-  "process_path": []
+	"enabled": true,
+	"mode": "blacklist",
+	"_comment": "blacklist: listed entries bypass the tunnel. whitelist: only listed entries use the proxy, and the sing-box config must set route.final to that proxy; everything else goes direct. An empty whitelist sends every destination direct and does not need route.final. A whitelist ip_cidr that overlaps tun route_exclude_address is removed from that exclude so the packet can enter the adapter. domain_suffix google.com matches that domain and every subdomain level (www.google.com, a.b.google.com); a leading *. is optional and is stripped. A bare IP becomes /32. process_path is case-sensitive. No trailing commas. _example is not applied.",
+	"_example": {
+		"enabled": true,
+		"mode": "whitelist",
+		"ip_cidr": ["10.0.0.0/8", "172.16.0.0/12"],
+		"domain_suffix": ["*.google.com", "youtube.com"],
+		"process_name": ["chrome.exe", "firefox.exe", "brave.exe"],
+		"process_path": [
+			"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+		]
+	},
+	"ip_cidr": [],
+	"domain_suffix": [],
+	"process_name": [],
+	"process_path": []
 }

@@ -1,34 +1,34 @@
 {
-  "sing_box_path": "sing-box.exe",
-  "wintun_dll_path": "wintun.dll",
-  "config_dir": ".",
-  "selected_config": "config.json",
-  "system_proxy_inbound": "",
-  "autostart": false,
-  "start_on_launch": false,
-  "default_mode": "tun",
-  "log_lines": 200,
-  "language": "auto",
-  "system_proxy": {
-    "tag": "mixed-in",
-    "listen": "127.0.0.1",
-    "listen_port": 2080
-  },
-  "clash_api": {
-    "enabled": true,
-    "listen": "127.0.0.1:9090",
-    "secret": "",
-    "yacd": true
-  },
-  "tun": {
-    "interface_name": "singbox-tun",
-    "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
-    "route_address": ["0.0.0.0/1", "128.0.0.0/1"],
-    "route_exclude_address": [
-      "127.0.0.0/8", "::1/128",
-      "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16",
-      "fc00::/7", "fe80::/10", "ff00::/8"
-    ],
-    "mtu": 9000
-  }
+	"sing_box_path": "deps/sing-box.exe",
+	"wintun_dll_path": "deps/wintun.dll",
+	"config_dir": "configs",
+	"selected_config": "config.json",
+	"system_proxy_inbound": "",
+	"autostart": false,
+	"start_on_launch": false,
+	"default_mode": "tun",
+	"log_lines": 200,
+	"language": "auto",
+	"system_proxy": {
+		"tag": "mixed-in",
+		"listen": "127.0.0.1",
+		"listen_port": 2080
+	},
+	"clash_api": {
+		"enabled": true,
+		"listen": "127.0.0.1:9090",
+		"secret": "",
+		"yacd": true
+	},
+	"tun": {
+		"interface_name": "singbox-tun",
+		"address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+		"route_address": ["0.0.0.0/1", "128.0.0.0/1"],
+		"route_exclude_address": [
+			"127.0.0.0/8", "::1/128",
+			"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16",
+			"fc00::/7", "fe80::/10", "ff00::/8"
+		],
+		"mtu": 9000
+	}
 }

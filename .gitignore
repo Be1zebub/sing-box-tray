@@ -1,6 +1,12 @@
 # Build output
 build/
 
+# Default output of scripts/install.ps1 and scripts/install.sh
+/sing-box-tray/
+
+# Internal mascot animation editor. Not part of the tray build or the release.
+tools/mascot-edit/
+
 # IDE
 .idea/
 

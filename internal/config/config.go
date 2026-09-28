@@ -13,10 +13,18 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Be1zebub/sing-box-tray-runner/assets"
+	"github.com/Be1zebub/sing-box-tray/assets"
 )
 
-const trayConfigFile = "tray-config.json"
+const (
+	// trayConfigFile is the tray settings file created for a new install.
+	// It is not a sing-box config. Sing-box configs live in config_dir
+	// (default "configs"), so the shared name does not collide.
+	trayConfigFile = "config.json"
+	// legacyTrayConfigFile is the pre-layout name. It is still read when
+	// config.json is absent or is a sing-box config rather than tray settings.
+	legacyTrayConfigFile = "tray-config.json"
+)
 
 type TrayConfig struct {
 	SingBoxPath        string            `json:"sing_box_path"`
@@ -32,6 +40,10 @@ type TrayConfig struct {
 	SystemProxy        SystemProxyConfig `json:"system_proxy"`
 	TUN                TUNConfig         `json:"tun"`
 	ClashAPI           ClashAPIConfig    `json:"clash_api"`
+
+	// filePath is the tray settings file Load read or created. Save writes
+	// back to it. Not serialized.
+	filePath string
 }
 
 // SystemProxyConfig describes the default mixed inbound to inject into the
@@ -63,20 +75,24 @@ type ClashAPIConfig struct {
 }
 
 func Load(exeDir string) (*TrayConfig, error) {
-	path := filepath.Join(exeDir, trayConfigFile)
+	path, err := TrayConfigPath(exeDir)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		if writeErr := os.WriteFile(path, assets.DefaultTrayConfig, 0644); writeErr != nil {
-			return nil, fmt.Errorf("write default tray-config.json: %w", writeErr)
+			return nil, fmt.Errorf("write default %s: %w", filepath.Base(path), writeErr)
 		}
 		data = assets.DefaultTrayConfig
 	} else if err != nil {
-		return nil, fmt.Errorf("read tray-config.json: %w", err)
+		return nil, fmt.Errorf("read %s: %w", filepath.Base(path), err)
 	}
 	var cfg TrayConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse tray-config.json: %w", err)
+		return nil, fmt.Errorf("parse %s: %w", filepath.Base(path), err)
 	}
+	cfg.filePath = path
 	if cfg.LogLines <= 0 {
 		cfg.LogLines = 200
 	}
@@ -110,7 +126,7 @@ func Load(exeDir string) (*TrayConfig, error) {
 		}
 	}
 	if cfg.ConfigDir == "" {
-		cfg.ConfigDir = "."
+		cfg.ConfigDir = "configs"
 	}
 	if cfg.SelectedConfig == "" {
 		cfg.SelectedConfig = "config.json"
@@ -167,6 +183,65 @@ func hasKey(data []byte, key string) bool {
 	return ok
 }
 
+// FilePath is the tray settings file Load read or created.
+func (c *TrayConfig) FilePath() string {
+	return c.filePath
+}
+
+// TrayConfigPath picks the tray settings file. config.json wins when it
+// actually contains tray settings (sing_box_path). An existing
+// tray-config.json is used otherwise. A sing-box document that already
+// occupies config.json is left alone, and the legacy filename is used so
+// Load does not overwrite it.
+func TrayConfigPath(exeDir string) (string, error) {
+	next := filepath.Join(exeDir, trayConfigFile)
+	legacy := filepath.Join(exeDir, legacyTrayConfigFile)
+	nextIsTray, err := isTrayConfig(next)
+	if err != nil {
+		return "", err
+	}
+	if nextIsTray {
+		return next, nil
+	}
+	legacyExists, err := fileExists(legacy)
+	if err != nil {
+		return "", err
+	}
+	if legacyExists {
+		return legacy, nil
+	}
+	nextExists, err := fileExists(next)
+	if err != nil {
+		return "", err
+	}
+	if nextExists {
+		return legacy, nil
+	}
+	return next, nil
+}
+
+func fileExists(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !info.IsDir(), nil
+}
+
+func isTrayConfig(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return hasKey(data, "sing_box_path"), nil
+}
+
 // ActiveConfigPath returns the full path to the currently selected sing-box
 // config file inside ConfigDir.
 func (c *TrayConfig) ActiveConfigPath() string {
@@ -175,8 +250,9 @@ func (c *TrayConfig) ActiveConfigPath() string {
 
 // ListConfigFiles returns the base names of every *.json file directly inside
 // dir (non-recursive), sorted alphabetically. tray-config.json and
-// split-tun.json are excluded since the default config dir is the exe
-// directory, where both live, and neither is a sing-box config.
+// split-tun.json are excluded. config.json is not: inside config_dir it is
+// a sing-box config. The tray settings file of that name lives next to the
+// exe, outside config_dir.
 func ListConfigFiles(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -188,7 +264,7 @@ func ListConfigFiles(dir string) ([]string, error) {
 			continue
 		}
 		name := e.Name()
-		if strings.EqualFold(name, trayConfigFile) || strings.EqualFold(name, splitTunFile) ||
+		if strings.EqualFold(name, legacyTrayConfigFile) || strings.EqualFold(name, splitTunFile) ||
 			!strings.EqualFold(filepath.Ext(name), ".json") {
 			continue
 		}
@@ -208,47 +284,61 @@ func absPath(base, p string) string {
 }
 
 // ReconcilePaths checks whether SingBoxPath, WintunDllPath, and the active
-// sing-box config still exist on disk. A path can go stale if the tray
-// launcher (and its companion files) were moved to a new folder while
-// tray-config.json still carries absolute paths from the old location: if a
-// configured path is missing but a same-named file exists directly in
-// exeDir, the config is repointed at it. changed reports whether any field
-// was repointed (the caller should persist the config); missingSingBox,
-// missingWintun, and missingConfig report whether that path is still
-// unresolved after the fallback attempt (WintunDllPath is optional, so an
-// empty value is never reported missing).
+// sing-box config still exist on disk. A path can go stale if the install
+// folder was moved while the tray settings still carry absolute paths from
+// the old location. A missing path is repointed at the same file name next
+// to the exe, then at deps/ (binaries) or configs/ (the selected sing-box
+// config). changed reports whether any field was repointed (the caller
+// should persist the config). missingSingBox, missingWintun, and
+// missingConfig report whether that path is still unresolved after the
+// fallback attempt (WintunDllPath is optional, so an empty value is never
+// reported missing).
 func (c *TrayConfig) ReconcilePaths(exeDir string) (changed, missingSingBox, missingWintun, missingConfig bool) {
-	reconcile := func(current *string) bool {
+	reconcile := func(current *string, extras ...string) bool {
 		if *current == "" {
 			return true
 		}
 		if _, err := os.Stat(*current); err == nil {
 			return true
 		}
-		fallback := filepath.Join(exeDir, filepath.Base(*current))
-		if fallback == *current {
-			return false
+		candidates := append([]string{filepath.Join(exeDir, filepath.Base(*current))}, extras...)
+		for _, fallback := range candidates {
+			if fallback == *current {
+				continue
+			}
+			if _, err := os.Stat(fallback); err != nil {
+				continue
+			}
+			*current = fallback
+			changed = true
+			return true
 		}
-		if _, err := os.Stat(fallback); err != nil {
-			return false
-		}
-		*current = fallback
-		changed = true
-		return true
+		return false
 	}
 
-	missingSingBox = !reconcile(&c.SingBoxPath)
-	missingWintun = !reconcile(&c.WintunDllPath)
+	missingSingBox = !reconcile(&c.SingBoxPath, filepath.Join(exeDir, "deps", filepath.Base(c.SingBoxPath)))
+	missingWintun = !reconcile(&c.WintunDllPath, filepath.Join(exeDir, "deps", filepath.Base(c.WintunDllPath)))
 
 	activePath := c.ActiveConfigPath()
 	if _, err := os.Stat(activePath); err != nil {
-		fallback := filepath.Join(exeDir, c.SelectedConfig)
-		if fallback == activePath {
-			missingConfig = true
-		} else if _, err := os.Stat(fallback); err != nil {
+		found := ""
+		for _, fallback := range []string{
+			filepath.Join(exeDir, c.SelectedConfig),
+			filepath.Join(exeDir, "configs", c.SelectedConfig),
+		} {
+			if fallback == activePath {
+				continue
+			}
+			if _, err := os.Stat(fallback); err != nil {
+				continue
+			}
+			found = fallback
+			break
+		}
+		if found == "" {
 			missingConfig = true
 		} else {
-			c.ConfigDir = exeDir
+			c.ConfigDir = filepath.Dir(found)
 			changed = true
 		}
 	}
@@ -257,10 +347,17 @@ func (c *TrayConfig) ReconcilePaths(exeDir string) (changed, missingSingBox, mis
 }
 
 func (c *TrayConfig) Save(exeDir string) error {
-	path := filepath.Join(exeDir, trayConfigFile)
+	path := c.filePath
+	if path == "" {
+		var err error
+		path, err = TrayConfigPath(exeDir)
+		if err != nil {
+			return err
+		}
+	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal tray-config.json: %w", err)
+		return fmt.Errorf("marshal %s: %w", filepath.Base(path), err)
 	}
 	return os.WriteFile(path, data, 0644)
 }
