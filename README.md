@@ -4,13 +4,14 @@
 [![downloads][badge-downloads]][releases] [![github stars][badge-stars]][repo]
 ![Visitors](https://visitor-badge.laobi.icu/badge?page_id=Be1zebub/sing-box-tray)
 
-A [sing-box](https://github.com/sagernet/sing-box) tray launcher for Windows. Less UI, more UX.
+A [sing-box](https://github.com/sagernet/sing-box) tray launcher for Windows. Made with idea "Less UI, more UX".  
+Thin sing-box client without magic, direct access to core & real configs.
 
 Most GUI clients put a settings screen between you and the config. Editing gets harder, and you can only change what they decided to expose. A button rarely says what it actually does.  
 This tray stays out of the way: the config is the sing-box file you wrote, and it is never rewritten. The menu is a fast way to drive the core.  
 Built for people who want a transparent client.
 
-<img src="assets/showcase.png" width="411" alt="showcase">
+<img src="assets/showcase-v2.png" width="720" alt="showcase">
 
 ## Quick start
 
