@@ -3,7 +3,9 @@
 package tray
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -24,5 +26,19 @@ func TestImportedConfigName(t *testing.T) {
 	}
 	if _, ok := importedConfigName(dir, "  \n"); ok {
 		t.Fatal("empty note must not prompt")
+	}
+}
+
+func TestInstallYacdBoot(t *testing.T) {
+	dir := t.TempDir()
+	if err := installYacdBoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, yacdBootFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "yacd.metacubex.one") {
+		t.Fatal("boot page must write YACD's localStorage key")
 	}
 }

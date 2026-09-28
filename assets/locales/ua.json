@@ -16,6 +16,7 @@
 	"menu_open_singbox_configs": "Конфіги sing-box",
 	"menu_open_importer": "Відкрити config importer",
 	"menu_proxy": "Проксі",
+	"menu_open_yacd": "Відкрити YACD",
 	"menu_proxy_test": "Заміряти",
 	"menu_proxy_testing": "Замір...",
 	"menu_autostart": "Автозапуск",
@@ -41,6 +42,7 @@
 	"dialog_missing_config_fmt": "Не знайдено файл конфігурації sing-box за шляхом:\n%s\n\nРозмістіть файл конфігурації там або оберіть інший у меню «Конфіг».",
 	"dialog_missing_importer_fmt": "config-importer.exe не знайдено за шляхом:\n%s\n\nЗберіть його через scripts\\build-importer.ps1 і покладіть exe поруч із треєм.",
 	"dialog_import_saved_fmt": "Збережено %s.\nЗробити поточним і запустити sing-box?",
+	"dialog_yacd_not_running": "sing-box не запущено, тому YACD зараз не роздається.",
 
 	"log_window_title": "Логи sing-box",
 

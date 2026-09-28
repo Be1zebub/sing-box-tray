@@ -16,6 +16,7 @@
 	"menu_open_singbox_configs": "sing-box configs",
 	"menu_open_importer": "Open config importer",
 	"menu_proxy": "Proxy",
+	"menu_open_yacd": "Open YACD",
 	"menu_proxy_test": "Test",
 	"menu_proxy_testing": "Testing...",
 	"menu_autostart": "Autostart",
@@ -41,6 +42,7 @@
 	"dialog_missing_config_fmt": "No sing-box config file was found at:\n%s\n\nPlace a config file there, or choose another one in the Config menu.",
 	"dialog_missing_importer_fmt": "config-importer.exe was not found at:\n%s\n\nBuild it with scripts\\build-importer.ps1 and place the exe next to the tray.",
 	"dialog_import_saved_fmt": "Saved %s.\nUse it and start sing-box?",
+	"dialog_yacd_not_running": "sing-box is not running, so YACD is not being served.",
 
 	"log_window_title": "sing-box logs",
 

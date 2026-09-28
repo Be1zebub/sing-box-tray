@@ -110,6 +110,20 @@ func TestApplyClashAPIEnabled(t *testing.T) {
 	}
 }
 
+func TestDashboardURL(t *testing.T) {
+	got, err := ClashAPIConfig{Listen: "127.0.0.1:9090", Secret: "abc"}.DashboardURL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "http://127.0.0.1:9090/ui/boot.html?hostname=127.0.0.1&port=9090&secret=abc"
+	if got != want {
+		t.Fatalf("got %s", got)
+	}
+	if _, err := (ClashAPIConfig{Listen: "9090"}).DashboardURL(); err == nil {
+		t.Fatal("listen without a host must fail")
+	}
+}
+
 // TestCopyWithClashAPIDoesNotTouchSource is the Off-mode guarantee: the user's
 // config must come back byte-identical.
 func TestCopyWithClashAPIDoesNotTouchSource(t *testing.T) {

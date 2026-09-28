@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -154,6 +156,31 @@ func Load(exeDir string) (*TrayConfig, error) {
 	}
 
 	return &cfg, nil
+}
+
+// DashboardURL is a same-origin boot page served next to YACD.
+// Go's file server 301s /ui/index.html to /ui/, and YACD's service worker
+// answers a navigation to /ui/?query with a network error. boot.html is not
+// index.html, so it is returned as-is; its script stores the secret and then
+// opens /ui/ with no query.
+func (c ClashAPIConfig) DashboardURL() (string, error) {
+	host, port, err := net.SplitHostPort(c.Listen)
+	if err != nil {
+		return "", fmt.Errorf("clash api listen %q: %w", c.Listen, err)
+	}
+	u := url.URL{
+		Scheme: "http",
+		Host:   net.JoinHostPort(host, port),
+		Path:   "/ui/boot.html",
+	}
+	q := url.Values{}
+	q.Set("hostname", host)
+	q.Set("port", port)
+	if c.Secret != "" {
+		q.Set("secret", c.Secret)
+	}
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 
 // EnsureClashSecret fills ClashAPI.Secret with a fresh random value when the

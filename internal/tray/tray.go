@@ -89,12 +89,13 @@ type menuItems struct {
 	langRU   *systray.MenuItem
 	langUA   *systray.MenuItem
 
-	autostart *systray.MenuItem
-	clashAPI  *systray.MenuItem
-	clashYacd *systray.MenuItem
-	viewLogs  *systray.MenuItem
-	about     *systray.MenuItem
-	quit      *systray.MenuItem
+	autostart     *systray.MenuItem
+	clashAPI      *systray.MenuItem
+	clashYacd     *systray.MenuItem
+	clashOpenYacd *systray.MenuItem
+	viewLogs      *systray.MenuItem
+	about         *systray.MenuItem
+	quit          *systray.MenuItem
 }
 
 // proxyMenuGroup is one group inside the Proxy submenu, with its radio items
@@ -201,7 +202,8 @@ func (a *App) OnReady() {
 	mAuto := systray.AddMenuItemCheckbox(a.strs.MenuAutostart, a.strs.MenuAutostartTip, autostart.IsEnabled())
 	mClashAPI := systray.AddMenuItemCheckbox(clashAPILabel, "", a.cfg.ClashAPI.Enabled)
 	mYacd := systray.AddMenuItemCheckbox(yacdLabel, "", a.cfg.ClashAPI.Yacd)
-	setClashMenuState(mClashAPI, mYacd, a.cfg.ClashAPI)
+	mOpenYacd := systray.AddMenuItem(a.strs.MenuOpenYacd, "")
+	setClashMenuState(mClashAPI, mYacd, mOpenYacd, a.cfg.ClashAPI)
 	systray.AddSeparator()
 
 	mOpenConfig := systray.AddMenuItem(a.strs.MenuOpenConfig, "")
@@ -250,12 +252,13 @@ func (a *App) OnReady() {
 		langRU:   mLangRU,
 		langUA:   mLangUA,
 
-		autostart: mAuto,
-		clashAPI:  mClashAPI,
-		clashYacd: mYacd,
-		viewLogs:  mLogs,
-		about:     mAbout,
-		quit:      mQuit,
+		autostart:     mAuto,
+		clashAPI:      mClashAPI,
+		clashYacd:     mYacd,
+		clashOpenYacd: mOpenYacd,
+		viewLogs:      mLogs,
+		about:         mAbout,
+		quit:          mQuit,
 	}
 
 	go a.watchState()
@@ -896,13 +899,18 @@ func (a *App) openLogTerminal() {
 
 // setClashMenuState syncs the Clash API / YACD checkboxes with cfg. YACD is
 // served by the Clash API, so its item is disabled while the API is off.
-func setClashMenuState(apiItem, yacdItem *systray.MenuItem, cfg config.ClashAPIConfig) {
+func setClashMenuState(apiItem, yacdItem, openItem *systray.MenuItem, cfg config.ClashAPIConfig) {
 	checkOrUncheck(apiItem, cfg.Enabled)
 	checkOrUncheck(yacdItem, cfg.Yacd)
 	if cfg.Enabled {
 		yacdItem.Enable()
 	} else {
 		yacdItem.Disable()
+	}
+	if cfg.Enabled && cfg.Yacd {
+		openItem.Enable()
+	} else {
+		openItem.Disable()
 	}
 }
 
@@ -921,7 +929,7 @@ func (a *App) toggleClashAPI() {
 			a.log("clash api: generated a new secret")
 		}
 	}
-	setClashMenuState(a.items.clashAPI, a.items.clashYacd, a.cfg.ClashAPI)
+	setClashMenuState(a.items.clashAPI, a.items.clashYacd, a.items.clashOpenYacd, a.cfg.ClashAPI)
 	if err := a.cfg.Save(a.exeDir); err != nil {
 		a.log("save config after clash api toggle: %s", err)
 	}
@@ -933,12 +941,48 @@ func (a *App) toggleClashAPI() {
 // the menu item is only enabled while the API is on.
 func (a *App) toggleYacd() {
 	a.cfg.ClashAPI.Yacd = !a.cfg.ClashAPI.Yacd
-	checkOrUncheck(a.items.clashYacd, a.cfg.ClashAPI.Yacd)
 	if err := a.cfg.Save(a.exeDir); err != nil {
 		a.log("save config after yacd toggle: %s", err)
 	}
 	a.log("yacd: %v", a.cfg.ClashAPI.Yacd)
+	setClashMenuState(a.items.clashAPI, a.items.clashYacd, a.items.clashOpenYacd, a.cfg.ClashAPI)
 	a.restartIfRunning()
+}
+
+// openYacd opens the dashboard in the browser with the Clash API secret
+// already stored. The secret is not written to the log.
+func (a *App) openYacd() {
+	if !a.cfg.ClashAPI.Enabled || !a.cfg.ClashAPI.Yacd {
+		return
+	}
+	if !a.proc.IsRunning() {
+		infoBox(a.strs.DialogYacdNotRunning, appTitle)
+		return
+	}
+	dir, err := a.findYacdDir()
+	if err != nil {
+		a.log("yacd dir: %s", err)
+		infoBox(a.strs.DialogYacdNotRunning, appTitle)
+		return
+	}
+	if err := installYacdBoot(dir); err != nil {
+		a.log("yacd boot: %s", err)
+		infoBox(fmt.Sprintf(a.strs.DialogErrorFmt, err), appTitle)
+		return
+	}
+	raw, err := a.cfg.ClashAPI.DashboardURL()
+	if err != nil {
+		a.log("yacd url: %s", err)
+		infoBox(fmt.Sprintf(a.strs.DialogErrorFmt, err), appTitle)
+		return
+	}
+	// Quoted so cmd does not split the query on &. Dropping admin keeps the
+	// browser out of the elevated tray token.
+	line := `cmd.exe /c start "" ` + cmdQuote(escapeCmdPercent(raw, 1))
+	if _, err := a.startDropAdmin(line); err != nil {
+		a.log("open yacd failed: %s", err)
+		infoBox(fmt.Sprintf(a.strs.DialogErrorFmt, err), appTitle)
+	}
 }
 
 // restartIfRunning restarts sing-box so a config-level change takes effect.
@@ -1211,6 +1255,7 @@ func (a *App) refreshMenuTexts() {
 	a.items.openSingboxConfigs.SetTitle(a.strs.MenuOpenSingboxConfigs)
 	a.items.openImporter.SetTitle(a.strs.MenuOpenImporter)
 	a.items.proxy.SetTitle(a.strs.MenuProxy)
+	a.items.clashOpenYacd.SetTitle(a.strs.MenuOpenYacd)
 	for _, g := range a.proxyGroups {
 		if g.test != nil {
 			g.test.SetTitle(a.strs.MenuProxyTest)
@@ -1478,6 +1523,8 @@ func (a *App) handleClicks() {
 			go a.toggleClashAPI()
 		case <-a.items.clashYacd.ClickedCh:
 			go a.toggleYacd()
+		case <-a.items.clashOpenYacd.ClickedCh:
+			go a.openYacd()
 		case <-a.items.viewLogs.ClickedCh:
 			go a.openLogTerminal()
 		case <-a.items.about.ClickedCh:

@@ -41,6 +41,7 @@ type Strings struct {
 	MenuOpenSingboxConfigs string `json:"menu_open_singbox_configs"`
 	MenuOpenImporter       string `json:"menu_open_importer"`
 	MenuProxy              string `json:"menu_proxy"`
+	MenuOpenYacd           string `json:"menu_open_yacd"`
 	MenuProxyTest          string `json:"menu_proxy_test"`
 	MenuProxyTesting       string `json:"menu_proxy_testing"`
 	MenuAutostart          string `json:"menu_autostart"`
@@ -67,6 +68,7 @@ type Strings struct {
 	DialogMissingConfigFmt   string `json:"dialog_missing_config_fmt"`
 	DialogMissingImporterFmt string `json:"dialog_missing_importer_fmt"`
 	DialogImportSavedFmt     string `json:"dialog_import_saved_fmt"`
+	DialogYacdNotRunning     string `json:"dialog_yacd_not_running"`
 
 	LogWindowTitle string `json:"log_window_title"`
 
