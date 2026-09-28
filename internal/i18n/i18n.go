@@ -41,6 +41,8 @@ type Strings struct {
 	MenuOpenSingboxConfigs string `json:"menu_open_singbox_configs"`
 	MenuOpenImporter       string `json:"menu_open_importer"`
 	MenuProxy              string `json:"menu_proxy"`
+	MenuProxyTest          string `json:"menu_proxy_test"`
+	MenuProxyTesting       string `json:"menu_proxy_testing"`
 	MenuAutostart          string `json:"menu_autostart"`
 	MenuAutostartTip       string `json:"menu_autostart_tip"`
 	MenuViewLogs           string `json:"menu_view_logs"`

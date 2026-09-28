@@ -242,6 +242,17 @@ func ActiveRoute(defaultTag string, groups []Group) (leaf, via string) {
 	}
 }
 
+// Delayable reports whether name is a concrete proxy. direct, block, and dns
+// are sing-box built-ins; a group delay test skips them.
+func Delayable(name string) bool {
+	switch name {
+	case "", "direct", "block", "dns":
+		return false
+	default:
+		return true
+	}
+}
+
 // Probeable reports whether leaf is a proxy worth a delay request.
 // direct, block, and dns are sing-box's non-proxy defaults. A group member
 // keeps its name even when that name is one of those tags.

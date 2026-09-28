@@ -16,6 +16,8 @@
 	"menu_open_singbox_configs": "Конфіги sing-box",
 	"menu_open_importer": "Відкрити config importer",
 	"menu_proxy": "Проксі",
+	"menu_proxy_test": "Заміряти",
+	"menu_proxy_testing": "Замір...",
 	"menu_autostart": "Автозапуск",
 	"menu_autostart_tip": "Запускати під час входу в Windows",
 	"menu_view_logs": "Перегляд логів",

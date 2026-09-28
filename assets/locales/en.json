@@ -16,6 +16,8 @@
 	"menu_open_singbox_configs": "sing-box configs",
 	"menu_open_importer": "Open config importer",
 	"menu_proxy": "Proxy",
+	"menu_proxy_test": "Test",
+	"menu_proxy_testing": "Testing...",
 	"menu_autostart": "Autostart",
 	"menu_autostart_tip": "Run on Windows logon",
 	"menu_view_logs": "View Logs",

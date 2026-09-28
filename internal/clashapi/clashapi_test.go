@@ -196,6 +196,12 @@ func TestActiveRouteDirectIsNotAGroup(t *testing.T) {
 	if !Probeable("direct", "Proxy") {
 		t.Fatal("a selected member named direct should still be probed")
 	}
+	if Delayable("direct") || Delayable("block") || Delayable("dns") || Delayable("") {
+		t.Fatal("built-in tags are not group-test targets")
+	}
+	if !Delayable("node-a") {
+		t.Fatal("a concrete member should be tested")
+	}
 }
 
 func TestActiveRouteStopsOnCycle(t *testing.T) {

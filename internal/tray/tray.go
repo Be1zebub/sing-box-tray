@@ -102,6 +102,7 @@ type menuItems struct {
 type proxyMenuGroup struct {
 	name   string
 	parent *systray.MenuItem
+	test   *systray.MenuItem
 	items  map[string]*systray.MenuItem
 }
 
@@ -133,6 +134,7 @@ type App struct {
 	proxyPing   int
 	pingGen     int
 	pingBusy    bool
+	proxyGen    int
 }
 
 func NewApp(cfg *config.TrayConfig, exeDir string, initialMode state.ProxyMode, releaseMutex func(), strs i18n.Strings) *App {
@@ -1004,6 +1006,9 @@ func (a *App) clearProxyMenu() {
 		for _, item := range g.items {
 			item.Hide()
 		}
+		if g.test != nil {
+			g.test.Hide()
+		}
 		if g.parent != nil {
 			g.parent.Hide()
 		}
@@ -1012,6 +1017,7 @@ func (a *App) clearProxyMenu() {
 	a.proxyShape = ""
 	a.mu.Lock()
 	a.pingGen++
+	a.proxyGen++
 	a.proxyLeaf = ""
 	a.proxyVia = ""
 	a.proxyPing = -1
@@ -1042,6 +1048,7 @@ func (a *App) buildProxyMenu(groups []clashapi.Group) {
 	for _, g := range groups {
 		parent := a.proxyParent.AddSubMenuItem(g.Name, "")
 		entry := proxyMenuGroup{name: g.Name, parent: parent, items: map[string]*systray.MenuItem{}}
+		entry.test = parent.AddSubMenuItem(a.strs.MenuProxyTest, "")
 
 		for _, member := range g.All {
 			item := parent.AddSubMenuItemCheckbox(member, "", member == g.Now)
@@ -1062,6 +1069,15 @@ func (a *App) buildProxyMenu(groups []clashapi.Group) {
 		}
 
 		a.proxyGroups = append(a.proxyGroups, entry)
+		groupName := g.Name
+		members := append([]string(nil), g.All...)
+		testItem := entry.test
+		items := entry.items
+		go func() {
+			for range testItem.ClickedCh {
+				go a.measureGroup(groupName, members, items, testItem)
+			}
+		}()
 	}
 
 	if len(a.proxyGroups) == 0 {
@@ -1084,6 +1100,54 @@ func (a *App) selectProxy(group, member string) {
 	}
 	a.log("proxy %s -> %s", group, member)
 	a.refreshProxyMenu()
+}
+
+// measureGroup probes each concrete member of one Proxy group once and writes
+// the delay onto that item. direct, block, and dns are skipped. A menu rebuild
+// bumps proxyGen so a probe still in flight stops touching hidden items.
+func (a *App) measureGroup(group string, members []string, items map[string]*systray.MenuItem, testItem *systray.MenuItem) {
+	a.mu.Lock()
+	if a.pingBusy {
+		a.mu.Unlock()
+		return
+	}
+	a.pingBusy = true
+	gen := a.proxyGen
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		a.pingBusy = false
+		a.mu.Unlock()
+	}()
+
+	testItem.Disable()
+	testItem.SetTitle(a.strs.MenuProxyTesting)
+	defer func() {
+		testItem.SetTitle(a.strs.MenuProxyTest)
+		testItem.Enable()
+	}()
+
+	a.log("proxy delay group %s (%d)", group, len(members))
+	client := a.proxyClient()
+	for _, member := range members {
+		a.mu.Lock()
+		stale := a.proxyGen != gen
+		a.mu.Unlock()
+		if stale {
+			return
+		}
+		item := items[member]
+		if item == nil || !clashapi.Delayable(member) {
+			continue
+		}
+		ms, err := client.Delay(member)
+		if err != nil {
+			a.log("proxy delay %s/%s: %s", group, member, err)
+			item.SetTitle(member + "  —")
+			continue
+		}
+		item.SetTitle(fmt.Sprintf("%s  %dms", member, ms))
+	}
 }
 
 // syncProxyChecks moves the radio checks to match the current Clash API state.
@@ -1147,6 +1211,11 @@ func (a *App) refreshMenuTexts() {
 	a.items.openSingboxConfigs.SetTitle(a.strs.MenuOpenSingboxConfigs)
 	a.items.openImporter.SetTitle(a.strs.MenuOpenImporter)
 	a.items.proxy.SetTitle(a.strs.MenuProxy)
+	for _, g := range a.proxyGroups {
+		if g.test != nil {
+			g.test.SetTitle(a.strs.MenuProxyTest)
+		}
+	}
 	a.items.autostart.SetTitle(a.strs.MenuAutostart)
 	a.items.autostart.SetTooltip(a.strs.MenuAutostartTip)
 	a.items.viewLogs.SetTitle(a.strs.MenuViewLogs)
