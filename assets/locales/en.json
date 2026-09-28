@@ -38,6 +38,7 @@
 	"dialog_missing_wintun_fmt": "wintun.dll was not found at:\n%s\n\nIt is required for TUN mode. Download wintun.dll from wintun.net and place it at that path.",
 	"dialog_missing_config_fmt": "No sing-box config file was found at:\n%s\n\nPlace a config file there, or choose another one in the Config menu.",
 	"dialog_missing_importer_fmt": "config-importer.exe was not found at:\n%s\n\nBuild it with scripts\\build-importer.ps1 and place the exe next to the tray.",
+	"dialog_import_saved_fmt": "Saved %s.\nUse it and start sing-box?",
 
 	"log_window_title": "sing-box logs",
 

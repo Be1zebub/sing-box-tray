@@ -46,7 +46,9 @@ releases and copy `assets/tray-config.default.json` and `assets/split-tun.defaul
 checkout, or from raw `main` when the script is piped). The tray itself still has no network.
 
 **Config submenu.** systray cannot remove items; `rebuildConfigMenu` hides the old ones. Those items
-own their `ClickedCh` goroutines.
+own their `ClickedCh` goroutines. A new file in `config_dir` only shows up in that list. The tray
+asks to select and start only when `config-importer` writes `importer-saved.txt` (the note passed
+as `--saved-note` when the tray launches it).
 
 **Opening files from an elevated tray.** `ShellExecuteW` fails with access denied. Open a file with
 `cmd /c start`, a folder with `explorer.exe`.

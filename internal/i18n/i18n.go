@@ -64,6 +64,7 @@ type Strings struct {
 	DialogMissingWintunFmt   string `json:"dialog_missing_wintun_fmt"`
 	DialogMissingConfigFmt   string `json:"dialog_missing_config_fmt"`
 	DialogMissingImporterFmt string `json:"dialog_missing_importer_fmt"`
+	DialogImportSavedFmt     string `json:"dialog_import_saved_fmt"`
 
 	LogWindowTitle string `json:"log_window_title"`
 

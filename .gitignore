@@ -13,6 +13,7 @@ tools/mascot-edit/
 # Runtime artifacts (placed next to the exe on the target machine)
 tray-config.json
 sing-box-tray.log
+importer-saved.txt
 
 # sing-box config: holds proxy credentials, never commit it
 config.json

@@ -118,15 +118,16 @@ func runTUIFlow() error {
 		}
 	}
 
-	var dest string
+	dest := defaultDest(flagConfigDir)
 	dform := huh.NewForm(huh.NewGroup(
 		huh.NewInput().
 			Title("Destination config path").
 			Placeholder(`C:\...\config.json`).
 			Value(&dest).
 			Validate(func(s string) error {
-				if strings.TrimSpace(s) == "" {
-					return errors.New("path is required")
+				s = strings.TrimSpace(s)
+				if s == "" || strings.HasSuffix(s, "/") || strings.HasSuffix(s, `\`) {
+					return errors.New("file name is required")
 				}
 				return nil
 			}),
@@ -156,7 +157,7 @@ func saveInteractive(dest string, src *singbox.Config) error {
 			return err
 		}
 		fmt.Println("saved:", dest)
-		return nil
+		return noteSaved(dest)
 	}
 
 	raw, err := os.ReadFile(dest)
@@ -190,7 +191,7 @@ func saveInteractive(dest string, src *singbox.Config) error {
 				return err
 			}
 			fmt.Println("saved (edited):", dest)
-			return nil
+			return noteSaved(dest)
 		}
 	}
 
@@ -198,5 +199,12 @@ func saveInteractive(dest string, src *singbox.Config) error {
 		return err
 	}
 	fmt.Println("saved:", dest)
+	return noteSaved(dest)
+}
+
+func noteSaved(dest string) error {
+	if err := writeSavedNote(flagSavedNote, dest); err != nil {
+		return fmt.Errorf("saved, but the tray was not notified: %w", err)
+	}
 	return nil
 }

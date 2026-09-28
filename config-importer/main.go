@@ -23,6 +23,13 @@ import (
 // has already shown the error on screen.
 var tuiHandled bool
 
+// Set when the tray launches the importer. configDir prefills the save path;
+// savedNote receives the absolute path after a successful save.
+var (
+	flagConfigDir string
+	flagSavedNote string
+)
+
 func main() {
 	if err := run(); err != nil {
 		if !tuiHandled {
@@ -47,6 +54,8 @@ func run() error {
 		downloadURL   = flag.String("download-url", "https://proof.ovh.net/files/10Mb.dat", "download test URL")
 		downloadLimit = flag.Int64("download-limit", 0, "max bytes downloaded per outbound (0 = whole file)")
 	)
+	flag.StringVar(&flagConfigDir, "config-dir", "", "directory prefilled as the save location")
+	flag.StringVar(&flagSavedNote, "saved-note", "", "file that receives the saved config path")
 	flag.Parse()
 
 	if *source == "" {
@@ -133,7 +142,7 @@ func run() error {
 		return err
 	}
 	fmt.Printf("saved: %s\n", *dest)
-	return nil
+	return noteSaved(*dest)
 }
 
 // applyDest merges src into an existing destination file, or copies it when the

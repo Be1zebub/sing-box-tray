@@ -38,6 +38,7 @@
 	"dialog_missing_wintun_fmt": "Файл wintun.dll не найден по пути:\n%s\n\nОн необходим для режима TUN. Скачайте wintun.dll с wintun.net и поместите его по этому пути.",
 	"dialog_missing_config_fmt": "Не найден конфигурационный файл sing-box по пути:\n%s\n\nПоместите файл конфигурации туда или выберите другой в меню «Конфиг».",
 	"dialog_missing_importer_fmt": "config-importer.exe не найден по пути:\n%s\n\nСоберите его через scripts\\build-importer.ps1 и положите exe рядом с треем.",
+	"dialog_import_saved_fmt": "Сохранён %s.\nСделать текущим и запустить sing-box?",
 
 	"log_window_title": "Логи sing-box",
 

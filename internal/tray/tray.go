@@ -36,6 +36,11 @@ import (
 const (
 	appTitle = "sing-box-tray"
 
+	// importerSavedFile is written by config-importer after a successful save
+	// when the tray launched it. A file dropped into configs by hand does not
+	// touch this file and does not prompt.
+	importerSavedFile = "importer-saved.txt"
+
 	// repoURL is this fork's own repository, shown in the About window.
 	repoURL = "https://github.com/Be1zebub/sing-box-tray"
 
@@ -117,6 +122,7 @@ type App struct {
 	pendingStart     bool
 	configWatcher    *watcher.Watcher
 	configDirWatcher *watcher.DirWatcher
+	importWatcher    *watcher.Watcher
 
 	proxyParent *systray.MenuItem
 	proxyStatus *systray.MenuItem
@@ -255,6 +261,7 @@ func (a *App) OnReady() {
 	go a.proxyMenuLoop()
 	a.restartConfigWatcher()
 	a.restartConfigDirWatcher()
+	a.watchImporterSaved()
 
 	go func() {
 		a.checkFirstRunDeps()
@@ -765,15 +772,94 @@ func (a *App) openConfigImporter() {
 		infoBox(fmt.Sprintf(a.strs.DialogMissingImporterFmt, path), appTitle)
 		return
 	}
-	tab := cmdQuote(escapeCmdPercent(path, 1))
+	// cmd.exe /c keeps wt from treating --config-dir as its own flag.
+	// Two cmd layers (start, then the tab shell) each expand %.
+	note := filepath.Join(a.exeDir, importerSavedFile)
+	tab := fmt.Sprintf(`cmd.exe /c ""%s" --config-dir "%s" --saved-note "%s""`,
+		escapeCmdPercent(path, 2),
+		escapeCmdPercent(a.cfg.ConfigDir, 2),
+		escapeCmdPercent(note, 2))
 	if err := a.startWindowsTerminal("config-importer", tab); err != nil {
 		a.log("config-importer: windows terminal: %s", err)
-		fallback := fmt.Sprintf(`cmd.exe /c start "" %s`, cmdQuote(escapeCmdPercent(path, 1)))
+		fallback := fmt.Sprintf(`cmd.exe /c start "" %s --config-dir %s --saved-note %s`,
+			cmdQuote(escapeCmdPercent(path, 1)),
+			cmdQuote(escapeCmdPercent(a.cfg.ConfigDir, 1)),
+			cmdQuote(escapeCmdPercent(note, 1)))
 		if _, err := a.startDropAdmin(fallback); err != nil {
 			a.log("open config-importer failed: %s", err)
 			infoBox(fmt.Sprintf(a.strs.DialogErrorFmt, err), appTitle)
 		}
 	}
+}
+
+// watchImporterSaved notices a config-importer save. The note file is created
+// up front so the first real write is a modification, which is what the
+// poller reports. A hand-copied file in configs never writes this note.
+func (a *App) watchImporterSaved() {
+	path := filepath.Join(a.exeDir, importerSavedFile)
+	if _, err := os.Stat(path); err != nil {
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			a.log("importer note: %s", err)
+			return
+		}
+	}
+	w := watcher.New([]string{path}, func(string) {
+		a.onImporterSaved(path)
+	})
+	w.Start()
+	a.importWatcher = w
+}
+
+func (a *App) onImporterSaved(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		a.log("importer note: %s", err)
+		return
+	}
+	name, ok := importedConfigName(a.cfg.ConfigDir, string(data))
+	if !ok {
+		a.log("import saved outside the config dir: %s", strings.TrimSpace(string(data)))
+		return
+	}
+	if _, err := os.Stat(filepath.Join(a.cfg.ConfigDir, name)); err != nil {
+		a.log("import saved missing file: %s", name)
+		return
+	}
+	a.rebuildConfigMenu(a.cfg.ConfigDir)
+	appState, _ := a.st.Get()
+	running := appState == state.StateRunning || appState == state.StateStarting
+	if strings.EqualFold(name, a.cfg.SelectedConfig) && running {
+		return
+	}
+	if !msgBox(fmt.Sprintf(a.strs.DialogImportSavedFmt, name), appTitle) {
+		return
+	}
+	if !strings.EqualFold(name, a.cfg.SelectedConfig) {
+		a.switchConfig(name)
+	}
+	appState, _ = a.st.Get()
+	if appState != state.StateRunning && appState != state.StateStarting {
+		a.start()
+	}
+}
+
+// importedConfigName accepts a saved path only when it is a json file directly
+// inside configDir. Anything else stays out of the Config menu prompt.
+func importedConfigName(configDir, saved string) (string, bool) {
+	saved = strings.TrimSpace(saved)
+	if saved == "" || strings.TrimSpace(configDir) == "" {
+		return "", false
+	}
+	saved = filepath.Clean(saved)
+	dir := filepath.Clean(configDir)
+	if !strings.EqualFold(filepath.Dir(saved), dir) {
+		return "", false
+	}
+	name := filepath.Base(saved)
+	if name == "." || !strings.EqualFold(filepath.Ext(name), ".json") {
+		return "", false
+	}
+	return name, true
 }
 
 // openConfigDir opens the config folder in Explorer. explorer.exe is spawned
