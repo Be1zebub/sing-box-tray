@@ -72,11 +72,12 @@ type menuItems struct {
 	configItems []*systray.MenuItem
 	configNames []string
 
-	openConfigFile   *systray.MenuItem
-	openConfigFolder *systray.MenuItem
-	openSplitTUN     *systray.MenuItem
-	openImporter     *systray.MenuItem
-	proxy            *systray.MenuItem
+	openConfig         *systray.MenuItem
+	openTrayConfig     *systray.MenuItem
+	openSplitTUN       *systray.MenuItem
+	openSingboxConfigs *systray.MenuItem
+	openImporter       *systray.MenuItem
+	proxy              *systray.MenuItem
 
 	langAuto *systray.MenuItem
 	langEN   *systray.MenuItem
@@ -171,25 +172,17 @@ func (a *App) OnReady() {
 	mRestart := systray.AddMenuItem(a.strs.MenuRestart, a.strs.MenuRestartTip)
 	systray.AddSeparator()
 
+	mConfig := systray.AddMenuItem(a.strs.MenuConfig, "")
+	configItems, configNames := a.buildConfigItems(mConfig, a.cfg.ConfigDir)
 	mMode := systray.AddMenuItem(a.strs.MenuMode, "")
 	mModeOff := mMode.AddSubMenuItem(a.strs.ModeOff, "")
 	mModeProxy := mMode.AddSubMenuItem(a.strs.ModeSystemProxy, "")
 	mModeTUN := mMode.AddSubMenuItem(a.strs.ModeTUN, "")
-	systray.AddSeparator()
-
-	mConfig := systray.AddMenuItem(a.strs.MenuConfig, "")
-	configItems, configNames := a.buildConfigItems(mConfig, a.cfg.ConfigDir)
-	mOpenConfigFile := systray.AddMenuItem(a.strs.MenuOpenConfigFile, "")
-	mOpenConfigFolder := systray.AddMenuItem(a.strs.MenuOpenConfigFolder, "")
-	mOpenSplitTUN := systray.AddMenuItem(a.strs.MenuOpenSplitTUN, "")
-	mOpenImporter := systray.AddMenuItem(a.strs.MenuOpenImporter, "")
 	mProxy := systray.AddMenuItem(a.strs.MenuProxy, "")
 	mProxyStatus := mProxy.AddSubMenuItem("—", "")
 	mProxyStatus.Disable()
 	mProxyStatus.Hide()
 	mProxy.Disable() // enabled once the Clash API answers
-	systray.AddSeparator()
-
 	mLanguages := systray.AddMenuItem(languagesMenuTitle, "")
 	mLangAuto := mLanguages.AddSubMenuItem(langLabelAuto, "")
 	mLangEN := mLanguages.AddSubMenuItem(langLabelEN, "")
@@ -203,9 +196,12 @@ func (a *App) OnReady() {
 	setClashMenuState(mClashAPI, mYacd, a.cfg.ClashAPI)
 	systray.AddSeparator()
 
+	mOpenConfig := systray.AddMenuItem(a.strs.MenuOpenConfig, "")
+	mOpenTrayConfig := mOpenConfig.AddSubMenuItem(a.trayConfigMenuTitle(), "")
+	mOpenSplitTUN := mOpenConfig.AddSubMenuItem(a.strs.MenuOpenSplitTUN, "")
+	mOpenSingboxConfigs := mOpenConfig.AddSubMenuItem(a.strs.MenuOpenSingboxConfigs, "")
+	mOpenImporter := systray.AddMenuItem(a.strs.MenuOpenImporter, "")
 	mLogs := systray.AddMenuItem(a.strs.MenuViewLogs, "")
-	systray.AddSeparator()
-
 	mAbout := systray.AddMenuItem(a.strs.MenuAbout, "")
 	systray.AddSeparator()
 
@@ -234,11 +230,12 @@ func (a *App) OnReady() {
 		configItems: configItems,
 		configNames: configNames,
 
-		openConfigFile:   mOpenConfigFile,
-		openConfigFolder: mOpenConfigFolder,
-		openSplitTUN:     mOpenSplitTUN,
-		openImporter:     mOpenImporter,
-		proxy:            mProxy,
+		openConfig:         mOpenConfig,
+		openTrayConfig:     mOpenTrayConfig,
+		openSplitTUN:       mOpenSplitTUN,
+		openSingboxConfigs: mOpenSingboxConfigs,
+		openImporter:       mOpenImporter,
+		proxy:              mProxy,
 
 		langAuto: mLangAuto,
 		langEN:   mLangEN,
@@ -717,20 +714,33 @@ func escapeCmdPercent(s string, layers int) string {
 	return s
 }
 
-// openActiveConfig opens the currently selected sing-box config in whatever
-// application is registered for .json files.
-//
-// It goes through cmd's `start` rather than ShellExecuteW: the tray runs
-// elevated for TUN, and a high-integrity process cannot hand a shell request to
-// the medium-integrity explorer, so ShellExecuteW fails with
-// SE_ERR_ACCESSDENIED (5). explorer.exe can't stand in either — given a file it
-// opens the containing folder instead of the file.
-func (a *App) openActiveConfig() {
-	cmd := exec.Command("cmd", "/c", "start", "", a.cfg.ActiveConfigPath())
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
-	if err := cmd.Start(); err != nil {
-		a.log("open config file failed: %s", err)
+// openTrayConfig opens the tray settings file (config.json, or tray-config.json
+// when a sing-box document already occupies that name).
+func (a *App) openTrayConfig() {
+	if err := openWithShell(a.cfg.FilePath()); err != nil {
+		a.log("open tray config failed: %s", err)
 	}
+}
+
+// trayConfigMenuTitle is the settings filename. New installs say config.json;
+// a legacy tray-config.json keeps its own name.
+func (a *App) trayConfigMenuTitle() string {
+	base := filepath.Base(a.cfg.FilePath())
+	if base == "" || base == "." {
+		return a.strs.MenuOpenTrayConfig
+	}
+	return base
+}
+
+// openWithShell opens path in the registered application. cmd's start is used
+// instead of ShellExecuteW: the tray runs elevated for TUN, and a
+// high-integrity process cannot hand a shell request to the medium-integrity
+// explorer, so ShellExecuteW fails with SE_ERR_ACCESSDENIED (5). explorer.exe
+// can't stand in either — given a file it opens the containing folder.
+func openWithShell(path string) error {
+	cmd := exec.Command("cmd", "/c", "start", "", path)
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+	return cmd.Start()
 }
 
 // openSplitTUN opens split-tun.json. LoadSplitTUN recreates the empty
@@ -741,9 +751,7 @@ func (a *App) openSplitTUN() {
 		a.log("open split-tun.json failed: %s", err)
 		return
 	}
-	cmd := exec.Command("cmd", "/c", "start", "", config.SplitTUNPath(a.exeDir))
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
-	if err := cmd.Start(); err != nil {
+	if err := openWithShell(config.SplitTUNPath(a.exeDir)); err != nil {
 		a.log("open split-tun.json failed: %s", err)
 	}
 }
@@ -1047,9 +1055,10 @@ func (a *App) refreshMenuTexts() {
 	a.items.modeProxy.SetTitle(a.strs.ModeSystemProxy)
 	a.items.modeTUN.SetTitle(a.strs.ModeTUN)
 	a.items.config.SetTitle(a.strs.MenuConfig)
-	a.items.openConfigFile.SetTitle(a.strs.MenuOpenConfigFile)
-	a.items.openConfigFolder.SetTitle(a.strs.MenuOpenConfigFolder)
+	a.items.openConfig.SetTitle(a.strs.MenuOpenConfig)
+	a.items.openTrayConfig.SetTitle(a.trayConfigMenuTitle())
 	a.items.openSplitTUN.SetTitle(a.strs.MenuOpenSplitTUN)
+	a.items.openSingboxConfigs.SetTitle(a.strs.MenuOpenSingboxConfigs)
 	a.items.openImporter.SetTitle(a.strs.MenuOpenImporter)
 	a.items.proxy.SetTitle(a.strs.MenuProxy)
 	a.items.autostart.SetTitle(a.strs.MenuAutostart)
@@ -1292,9 +1301,9 @@ func (a *App) handleClicks() {
 			go a.switchMode(state.ModeSystemProxy)
 		case <-a.items.modeTUN.ClickedCh:
 			go a.switchMode(state.ModeTUN)
-		case <-a.items.openConfigFile.ClickedCh:
-			go a.openActiveConfig()
-		case <-a.items.openConfigFolder.ClickedCh:
+		case <-a.items.openTrayConfig.ClickedCh:
+			go a.openTrayConfig()
+		case <-a.items.openSingboxConfigs.ClickedCh:
 			go a.openConfigDir()
 		case <-a.items.openSplitTUN.ClickedCh:
 			go a.openSplitTUN()
