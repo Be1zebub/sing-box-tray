@@ -16,9 +16,14 @@ linters:
         - (*github.com/lxn/walk.FormBase).Close
         - os.Remove
         - golang.org/x/sys/windows.CloseHandle
+        - (golang.org/x/sys/windows.Token).Close
+        - golang.org/x/sys/windows.RegCloseKey
         - (*golang.org/x/sys/windows.LazyProc).Call
+        - syscall.SyscallN
         - (*net/http.Response).Body.Close
         - fmt.Fprintf
+        - fmt.Fprint
+        - fmt.Print
     staticcheck:
       checks:
         - all

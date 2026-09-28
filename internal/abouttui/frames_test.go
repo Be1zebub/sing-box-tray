@@ -87,7 +87,7 @@ func TestLayersRunOnSeparateClocks(t *testing.T) {
 	if len(strip.eyes.rows) == 0 || len(strip.tail.rows) == 0 {
 		t.Fatalf("eyes rows %d, tail rows %d", len(strip.eyes.rows), len(strip.tail.rows))
 	}
-	var blink int = -1
+	var blink = -1
 	for i, frame := range strip.eyes.frames {
 		if frame.hold <= 200*time.Millisecond {
 			blink = i

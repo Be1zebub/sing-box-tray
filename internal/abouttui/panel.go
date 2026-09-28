@@ -216,22 +216,22 @@ func fileVersion(path string) string {
 	}
 	type trans struct{ Lang, CP uint16 }
 	sub, _ := windows.UTF16PtrFromString(`\VarFileInfo\Translation`)
-	var block uintptr
+	var block unsafe.Pointer
 	var n uint32
 	r, _, _ = queryProc.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(sub)), uintptr(unsafe.Pointer(&block)), uintptr(unsafe.Pointer(&n)))
-	if r == 0 || n < 4 || block == 0 {
+	if r == 0 || n < 4 || block == nil {
 		return ""
 	}
-	tr := (*trans)(unsafe.Pointer(block))
+	tr := (*trans)(block)
 	key := fmt.Sprintf(`\StringFileInfo\%04x%04x\FileVersion`, tr.Lang, tr.CP)
 	sub, _ = windows.UTF16PtrFromString(key)
-	block = 0
+	block = nil
 	n = 0
 	r, _, _ = queryProc.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(sub)), uintptr(unsafe.Pointer(&block)), uintptr(unsafe.Pointer(&n)))
-	if r == 0 || block == 0 {
+	if r == 0 || block == nil {
 		return ""
 	}
-	return strings.TrimSpace(windows.UTF16PtrToString((*uint16)(unsafe.Pointer(block))))
+	return strings.TrimSpace(windows.UTF16PtrToString((*uint16)(block)))
 }
 
 func styleTitle(s string) string { return "\x1b[1;38;2;120;230;90m" + s + "\x1b[0m" }

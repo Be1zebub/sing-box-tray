@@ -41,9 +41,6 @@ const (
 	// touch this file and does not prompt.
 	importerSavedFile = "importer-saved.txt"
 
-	// repoURL is this fork's own repository, shown in the About window.
-	repoURL = "https://github.com/Be1zebub/sing-box-tray"
-
 	// languagesMenuTitle is deliberately not translated — it's the control
 	// that changes the language, so it must stay findable regardless of the
 	// current UI language. Same reasoning for the language names themselves:
